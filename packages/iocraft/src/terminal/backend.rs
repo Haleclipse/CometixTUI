@@ -126,7 +126,7 @@ pub(super) trait TerminalImpl: Write + Send {
         true
     }
     fn write_canvas(&mut self, prev: Option<&Canvas>, canvas: &Canvas) -> io::Result<()>;
-    fn event_stream(&mut self) -> io::Result<BoxStream<'static, TerminalEvent>>;
+    fn event_stream(&mut self) -> io::Result<BoxStream<'static, io::Result<TerminalEvent>>>;
     fn dest(&mut self) -> &mut dyn Write;
     fn alt(&mut self) -> &mut dyn Write;
 }
@@ -336,6 +336,7 @@ pub(super) struct StdTerminal<'a> {
     pub(super) mouse_capture: bool,
     pub(super) dynamic_alternate_saved_mouse_capture: Option<bool>,
     pub(super) raw_mode_enabled: bool,
+    pub(super) supports_keyboard_enhancement: bool,
     pub(super) enabled_keyboard_enhancement: bool,
     pub(super) keyboard_enhancement_flags: event::KeyboardEnhancementFlags,
     pub(super) prev_canvas_top_row: u16,
@@ -978,7 +979,7 @@ impl TerminalImpl for StdTerminal<'_> {
         Ok(())
     }
 
-    fn event_stream(&mut self) -> io::Result<BoxStream<'static, TerminalEvent>> {
+    fn event_stream(&mut self) -> io::Result<BoxStream<'static, io::Result<TerminalEvent>>> {
         if !self.input_is_terminal {
             return Ok(stream::pending().boxed());
         }
@@ -988,25 +989,29 @@ impl TerminalImpl for StdTerminal<'_> {
         Ok(EventStream::new()
             .filter_map(|event| async move {
                 match event {
-                    Ok(Event::Key(event)) => Some(TerminalEvent::Key(KeyEvent {
+                    Ok(Event::Key(event)) => Some(Ok(TerminalEvent::Key(KeyEvent {
                         code: event.code,
                         modifiers: event.modifiers,
                         kind: event.kind,
-                    })),
+                    }))),
                     Ok(Event::Mouse(event)) => {
-                        Some(TerminalEvent::FullscreenMouse(FullscreenMouseEvent {
+                        Some(Ok(TerminalEvent::FullscreenMouse(FullscreenMouseEvent {
                             modifiers: event.modifiers,
                             column: event.column,
                             row: event.row,
                             cell_is_blank: false,
                             kind: event.kind,
-                        }))
+                        })))
                     }
-                    Ok(Event::Resize(width, height)) => Some(TerminalEvent::Resize(width, height)),
-                    Ok(Event::FocusGained) => Some(TerminalEvent::FocusGained),
-                    Ok(Event::FocusLost) => Some(TerminalEvent::FocusLost),
-                    Ok(Event::Paste(text)) => Some(TerminalEvent::Paste(text)),
-                    _ => None,
+                    Ok(Event::Resize(width, height)) => {
+                        Some(Ok(TerminalEvent::Resize(width, height)))
+                    }
+                    Ok(Event::FocusGained) => Some(Ok(TerminalEvent::FocusGained)),
+                    Ok(Event::FocusLost) => Some(Ok(TerminalEvent::FocusLost)),
+                    Ok(Event::Paste(text)) => Some(Ok(TerminalEvent::Paste(text))),
+                    // Ignore crossterm events that iocraft does not expose.
+                    Ok(_) => None,
+                    Err(error) => Some(Err(error)),
                 }
             })
             .boxed())
@@ -1028,14 +1033,22 @@ impl<'a> StdTerminal<'a> {
         fullscreen: bool,
         mouse_capture: bool,
     ) -> io::Result<Self> {
+        let input_is_terminal = stdin().is_terminal();
+        // The probe blocks on a query response, and some terminals (e.g. WezTerm)
+        // don't answer queries while a synchronized update is open — probing lazily
+        // from within a render would stall until the query times out.
+        let supports_keyboard_enhancement = input_is_terminal
+            && supports_extended_keys()
+            && terminal::supports_keyboard_enhancement().unwrap_or(false);
         let mut term = Self {
             dest,
             alt,
-            input_is_terminal: stdin().is_terminal(),
+            input_is_terminal,
             fullscreen,
             mouse_capture,
             dynamic_alternate_saved_mouse_capture: None,
             raw_mode_enabled: false,
+            supports_keyboard_enhancement,
             enabled_keyboard_enhancement: false,
             keyboard_enhancement_flags: event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
             prev_canvas_top_row: 0,
@@ -1411,9 +1424,7 @@ impl<'a> StdTerminal<'a> {
     fn apply_raw_mode_enabled(&mut self, raw_mode_enabled: bool) -> io::Result<()> {
         if raw_mode_enabled != self.raw_mode_enabled {
             if raw_mode_enabled {
-                if supports_extended_keys()
-                    && terminal::supports_keyboard_enhancement().unwrap_or(false)
-                {
+                if self.supports_keyboard_enhancement {
                     self.dest.execute(event::PushKeyboardEnhancementFlags(
                         self.keyboard_enhancement_flags,
                     ))?;

@@ -1597,7 +1597,11 @@ impl<'a> Tree<'a> {
             if self.system_context.should_exit() || term.received_ctrl_c() {
                 break;
             }
-            select(self.root_component.wait().boxed(), term.wait().boxed()).await;
+            if let Either::Right((result, _)) =
+                select(self.root_component.wait().boxed(), term.wait().boxed()).await
+            {
+                result?;
+            }
             if term.take_resumed() {
                 term.reinitialize_after_resume()?;
                 prev_canvas = None;
@@ -1633,7 +1637,12 @@ impl<'a> Tree<'a> {
                         .await
                         {
                             futures::future::Either::Left(_) => true,
-                            futures::future::Either::Right(_) => false,
+                            futures::future::Either::Right((wakeup, _)) => {
+                                if let Either::Right((result, _)) = wakeup {
+                                    result?;
+                                }
+                                false
+                            }
                         };
                         if term.take_resumed() {
                             term.reinitialize_after_resume()?;

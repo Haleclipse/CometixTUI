@@ -210,11 +210,11 @@ impl TerminalImpl for MockTerminal {
         Ok(())
     }
 
-    fn event_stream(&mut self) -> io::Result<BoxStream<'static, TerminalEvent>> {
+    fn event_stream(&mut self) -> io::Result<BoxStream<'static, io::Result<TerminalEvent>>> {
         self.raw_mode_enabled = true;
         let mut events = stream::pending().boxed();
         mem::swap(&mut events, &mut self.config.events);
-        Ok(events.chain(stream::pending()).boxed())
+        Ok(events.map(Ok).chain(stream::pending()).boxed())
     }
 
     fn dest(&mut self) -> &mut dyn Write {

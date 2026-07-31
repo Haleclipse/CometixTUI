@@ -407,6 +407,24 @@ fn clamp_offset_to_scroll_range(offset: i32, content_height: u16, viewport_heigh
     offset.clamp(0, max_offset(content_height, viewport_height))
 }
 
+/// Next `user_scrolled_up` state after a scroll input, judged by actual offset
+/// movement rather than the raw input delta so no-op input (e.g. scrolling up
+/// when content already fits the viewport) does not disable auto-scroll.
+fn user_scrolled_up_after_scroll(
+    user_scrolled_up: bool,
+    current_offset: i32,
+    new_offset: i32,
+    max_offset: i32,
+) -> bool {
+    if new_offset < current_offset {
+        true
+    } else if new_offset > current_offset && new_offset >= max_offset {
+        false
+    } else {
+        user_scrolled_up
+    }
+}
+
 fn clamp_offset_with_bounds(
     offset: i32,
     content_height: u16,
@@ -2157,9 +2175,9 @@ pub fn ScrollView<'a>(
                 if auto_scroll {
                     user_scrolled_up.set(user_scrolled_up_after_scroll(
                         user_scrolled_up.get(),
-                        current_offset,
+                        old_offset,
                         new_offset,
-                        max,
+                        max_offset(content_height.get(), vh.get()),
                     ));
                 }
 
@@ -2586,7 +2604,8 @@ fn ScrollViewContentMeasurer<'a>(
 mod tests {
     use super::{
         allow_drag_autoscroll_tick, reset_drag_autoscroll_ticks_for_render,
-        scroll_drain_mode_for_xterm_js_host, DragAutoscrollTickState, WheelAccelState,
+        scroll_drain_mode_for_xterm_js_host, user_scrolled_up_after_scroll,
+        DragAutoscrollTickState, WheelAccelState,
     };
     use crate::prelude::*;
     use futures::stream::{self, StreamExt};

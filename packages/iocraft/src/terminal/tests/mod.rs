@@ -352,10 +352,11 @@ impl TerminalImpl for ResizeReassertTerminal {
         Ok(())
     }
 
-    fn event_stream(&mut self) -> io::Result<BoxStream<'static, TerminalEvent>> {
+    fn event_stream(&mut self) -> io::Result<BoxStream<'static, io::Result<TerminalEvent>>> {
         Ok(self
             .events
             .take()
+            .map(|events| events.map(Ok).boxed())
             .unwrap_or_else(|| stream::pending().boxed()))
     }
 
@@ -823,6 +824,7 @@ fn new_fullscreen_term(
         mouse_capture: false,
         dynamic_alternate_saved_mouse_capture: None,
         raw_mode_enabled: false,
+        supports_keyboard_enhancement: false,
         enabled_keyboard_enhancement: false,
         keyboard_enhancement_flags: event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
         prev_canvas_top_row,
@@ -856,6 +858,7 @@ fn new_inline_term_with_size(
         mouse_capture: false,
         dynamic_alternate_saved_mouse_capture: None,
         raw_mode_enabled: false,
+        supports_keyboard_enhancement: false,
         enabled_keyboard_enhancement: false,
         keyboard_enhancement_flags: event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
         prev_canvas_top_row: 0,

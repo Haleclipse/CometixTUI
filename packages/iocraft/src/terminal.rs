@@ -269,7 +269,7 @@ pub(crate) struct Terminal<'a> {
     inner: Box<dyn TerminalImpl + 'a>,
     output: Output,
     base_fullscreen: bool,
-    event_stream: Option<BoxStream<'static, TerminalEvent>>,
+    event_stream: Option<BoxStream<'static, io::Result<TerminalEvent>>>,
     subscribers: Vec<Weak<Mutex<TerminalEventsInner>>>,
     event_cell_snapshot: Option<EventCellSnapshot>,
     terminal_focus_state: Option<bool>,
@@ -685,16 +685,12 @@ impl<'a> Terminal<'a> {
                     self.raw_input_session_request = Some(options);
                     self.event_stream = Some(stream::pending().boxed());
                 }
-                Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "terminal event stream ended",
-                ))
             }
         }
         Ok(())
     }
 
-    pub async fn wait(&mut self) {
+    pub async fn wait(&mut self) -> io::Result<()> {
         use futures::future::{poll_fn, select, Either};
 
         let event_cell_snapshot = self.event_cell_snapshot.clone();
@@ -707,11 +703,17 @@ impl<'a> Terminal<'a> {
                 let next =
                     match select(event_stream.next(), poll_fn(|cx| inner.poll_resumed(cx))).await {
                         Either::Left((next, _)) => next,
-                        Either::Right(((), _)) => return,
+                        Either::Right(((), _)) => return Ok(()),
                     };
                 let Some(event) = next else {
-                    return;
+                    // Propagate stream exhaustion so applications can shut down
+                    // when their terminal disappears.
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "terminal event stream ended",
+                    ));
                 };
+                let event = event?;
                 let now = Instant::now();
                 if self
                     .last_stdin_event_at
@@ -748,7 +750,7 @@ impl<'a> Terminal<'a> {
                     // after `fg`. Generic iocraft apps receive Ctrl+Z as normal
                     // input unless they explicitly enable this policy.
                     let _ = self.inner.suspend();
-                    return;
+                    return Ok(());
                 }
                 match &event {
                     TerminalEvent::FocusGained => self.terminal_focus_state = Some(true),
@@ -805,12 +807,13 @@ impl<'a> Terminal<'a> {
                     }
                 }
                 if self.received_ctrl_c || is_resize {
-                    return;
+                    return Ok(());
                 }
             },
             None => {
                 let inner = &mut self.inner;
                 poll_fn(|cx| inner.poll_resumed(cx)).await;
+                Ok(())
             }
         }
     }

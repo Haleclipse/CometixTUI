@@ -1200,6 +1200,18 @@ async fn test_terminal_render_loop_send() {
     .await;
 }
 
+#[apply(test!)]
+async fn test_terminal_render_loop_propagates_input_errors() {
+    let term = Terminal::mock_with_event_error(io::Error::other("input failed"));
+
+    let error = terminal_render_loop(&mut element!(View), term, None, None)
+        .await
+        .expect_err("terminal input errors should stop the render loop");
+
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    assert_eq!(error.to_string(), "input failed");
+}
+
 #[component]
 fn FullWidthComponent() -> impl Into<AnyElement<'static>> {
     element! {
