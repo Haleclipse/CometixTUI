@@ -2395,7 +2395,7 @@ pub fn ScrollView<'a>(
                 View(width: 100pct, height: 100pct, flex_direction: FlexDirection::Row) {
                     View(
                         overflow: Overflow::Hidden,
-                        flex_grow: 1.0,
+                        flex_grow: 1.0_f32,
                         height: 100pct,
                         flex_direction: FlexDirection::Column,
                         justify_content: JustifyContent::FLEX_END,
@@ -2445,7 +2445,7 @@ pub fn ScrollView<'a>(
     } else if show_scrollbar {
         element! {
             View(width: 100pct, height: 100pct, flex_direction: FlexDirection::Row) {
-                View(overflow: Overflow::Hidden, flex_grow: 1.0, height: 100pct) {
+                View(overflow: Overflow::Hidden, flex_grow: 1.0_f32, height: 100pct) {
                     View(position: Position::Absolute, top: -effective_offset, width: 100pct) {
                         ScrollViewContentMeasurer(
                             content_height_ref: Some(content_height_ref),
