@@ -21,7 +21,7 @@ use core::{
     task::{self, Poll},
 };
 use futures::{
-    future::{select, FutureExt, LocalBoxFuture},
+    future::{select, Either, FutureExt, LocalBoxFuture},
     stream::{Stream, StreamExt},
 };
 use std::{

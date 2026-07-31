@@ -685,6 +685,10 @@ impl<'a> Terminal<'a> {
                     self.raw_input_session_request = Some(options);
                     self.event_stream = Some(stream::pending().boxed());
                 }
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "terminal event stream ended",
+                ))
             }
         }
         Ok(())
@@ -854,6 +858,13 @@ impl Terminal<'static> {
             },
             output_stream,
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mock_with_event_error(error: io::Error) -> Self {
+        let (mut terminal, _output) = Self::mock(MockTerminalConfig::default());
+        terminal.event_stream = Some(stream::once(async move { Err(error) }).boxed());
+        terminal
     }
 }
 

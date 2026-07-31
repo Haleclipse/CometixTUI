@@ -1157,6 +1157,18 @@ mod tests {
 
     #[test]
     fn test_new_cursor_offset() {
+        let mixed_text = "你好世界，Hello World";
+        let cursor_offset = mixed_text.find('W').unwrap();
+        assert_eq!(
+            new_cursor_offset(
+                mixed_text,
+                cursor_offset,
+                "你好世界，Hello aWorld",
+                NewCursorOffsetHint::None
+            ),
+            cursor_offset + 1
+        );
+
         assert_eq!(
             new_cursor_offset("", 0, "foo", NewCursorOffsetHint::None),
             3

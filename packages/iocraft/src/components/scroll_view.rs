@@ -2155,12 +2155,12 @@ pub fn ScrollView<'a>(
                 scroll_offset.set(new_offset);
 
                 if auto_scroll {
-                    let max = max_offset(content_height.get(), vh.get());
-                    if delta < 0 {
-                        user_scrolled_up.set(true);
-                    } else if new_offset >= max {
-                        user_scrolled_up.set(false);
-                    }
+                    user_scrolled_up.set(user_scrolled_up_after_scroll(
+                        user_scrolled_up.get(),
+                        current_offset,
+                        new_offset,
+                        max,
+                    ));
                 }
 
                 if new_offset != old_offset || user_scrolled_up.get() != old_user_scrolled_up {
@@ -3551,6 +3551,63 @@ mod tests {
 
         let output = canvases.last().unwrap().to_string();
         assert!(output.contains("Short"));
+    }
+
+    #[apply(test!)]
+    async fn test_auto_scroll_ignores_input_when_content_is_shorter_than_viewport() {
+        #[component]
+        fn ShortAutoScrollContent(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+            let mut system = hooks.use_context_mut::<SystemContext>();
+            let mut done = hooks.use_state(|| false);
+
+            hooks.use_terminal_events(move |event| {
+                if let TerminalEvent::Key(KeyEvent {
+                    code: KeyCode::Char('q'),
+                    kind: KeyEventKind::Press,
+                    ..
+                }) = event
+                {
+                    done.set(true);
+                }
+            });
+
+            if done.get() {
+                system.exit();
+            }
+
+            element! {
+                View(width: 8, height: 6) {
+                    ScrollView(auto_scroll: true, scrollbar: Some(false)) {
+                        Text(content: "Line1\nLine2\nLine3")
+                    }
+                }
+            }
+        }
+
+        let baseline = element!(ShortAutoScrollContent)
+            .mock_terminal_render_loop(MockTerminalConfig::with_events(stream::iter(vec![
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('q'))),
+            ])))
+            .map(|canvas| canvas.to_string())
+            .collect::<Vec<_>>()
+            .await;
+
+        let after_scroll = element!(ShortAutoScrollContent)
+            .mock_terminal_render_loop(MockTerminalConfig::with_events(stream::iter(vec![
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Up)),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('q'))),
+            ])))
+            .map(|canvas| canvas.to_string())
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(after_scroll.last(), baseline.last());
+    }
+
+    #[test]
+    fn test_auto_scroll_state_ignores_input_when_scroll_range_is_zero() {
+        assert!(user_scrolled_up_after_scroll(true, 0, 0, 0));
+        assert!(!user_scrolled_up_after_scroll(false, 0, 0, 0));
     }
 
     #[apply(test!)]
