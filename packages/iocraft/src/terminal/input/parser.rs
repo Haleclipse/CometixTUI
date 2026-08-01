@@ -838,10 +838,11 @@ fn parse_terminal_key_sequence_impl(sequence: &str) -> TerminalParsedKey {
         key.name = Some("enter".to_string());
     } else if sequence == "\t" {
         key.name = Some("tab".to_string());
-    } else if sequence == "\x08" || sequence == "\x1b\x08" {
-        key.name = Some("backspace".to_string());
-        key.meta = sequence.starts_with('\x1b');
-    } else if sequence == "\x7f" || sequence == "\x1b\x7f" {
+    } else if sequence == "\x08"
+        || sequence == "\x1b\x08"
+        || sequence == "\x7f"
+        || sequence == "\x1b\x7f"
+    {
         key.name = Some("backspace".to_string());
         key.meta = sequence.starts_with('\x1b');
     } else if sequence == "\x1b" || sequence == "\x1b\x1b" {
@@ -889,10 +890,7 @@ fn parse_terminal_key_sequence_impl(sequence: &str) -> TerminalParsedKey {
         "\x1b[1;5D" => create_nav_key(sequence, "left", true),
         "\x1b[1;5C" => create_nav_key(sequence, "right", true),
         _ => {
-            key.fn_key = key
-                .name
-                .as_deref()
-                .is_some_and(|name| is_function_key_name(name));
+            key.fn_key = key.name.as_deref().is_some_and(is_function_key_name);
             key
         }
     }
@@ -987,7 +985,7 @@ fn keycode_to_name(codepoint: u32) -> Option<String> {
         57413 => "+",
         57414 => "return",
         57415 => "=",
-        32..=126 => {
+        33..=126 => {
             return char::from_u32(codepoint).map(|ch| ch.to_ascii_lowercase().to_string());
         }
         _ => return None,

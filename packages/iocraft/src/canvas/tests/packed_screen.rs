@@ -314,8 +314,10 @@ fn test_canvas_packed_screen_diff_uses_damage_and_shrink_regions_like_cc_screen(
 fn test_canvas_packed_screen_write_line_cache_matches_cc_output_write_line() {
     let mut pools = CanvasPackedCellPools::new();
     let mut cache = CanvasPackedLineCache::with_max_entries(2);
-    let mut style_text = CanvasTextStyle::default();
-    style_text.color = Some(Color::Green);
+    let style_text = CanvasTextStyle {
+        color: Some(Color::Green),
+        ..Default::default()
+    };
     let style = CanvasResolvedStyle {
         text: style_text,
         background_color: Some(Color::Blue),
@@ -375,8 +377,10 @@ fn test_canvas_packed_screen_write_line_cache_matches_cc_output_write_line() {
 fn test_canvas_packed_screen_write_line_runs_cache_styles_once_per_run() {
     let mut pools = CanvasPackedCellPools::new();
     let mut cache = CanvasPackedLineCache::new();
-    let mut link_style = CanvasTextStyle::default();
-    link_style.color = Some(Color::Cyan);
+    let link_style = CanvasTextStyle {
+        color: Some(Color::Cyan),
+        ..Default::default()
+    };
     let linked = CanvasResolvedStyle {
         text: link_style,
         background_color: Some(Color::DarkBlue),
@@ -451,8 +455,10 @@ fn test_canvas_packed_screen_write_line_runs_cache_styles_once_per_run() {
 fn test_canvas_packed_screen_write_line_runs_reorders_bidi_with_metadata_like_cc_output() {
     let mut pools = CanvasPackedCellPools::new();
     let mut cache = CanvasPackedLineCache::new();
-    let mut rtl_style_text = CanvasTextStyle::default();
-    rtl_style_text.color = Some(Color::Yellow);
+    let rtl_style_text = CanvasTextStyle {
+        color: Some(Color::Yellow),
+        ..Default::default()
+    };
     let rtl_style = CanvasResolvedStyle {
         text: rtl_style_text,
         background_color: None,
@@ -507,8 +513,10 @@ fn test_canvas_packed_screen_ansi_row_writer_matches_cc_sparse_row_shape() {
     let mut pools = CanvasPackedCellPools::new();
     let mut style_cache = CanvasStyleTransitionCache::new();
     let mut screen = CanvasPackedScreen::new(6, 1);
-    let mut linked_text = CanvasTextStyle::default();
-    linked_text.color = Some(Color::Green);
+    let linked_text = CanvasTextStyle {
+        color: Some(Color::Green),
+        ..Default::default()
+    };
     let linked_style = CanvasResolvedStyle {
         text: linked_text,
         background_color: None,
@@ -1303,9 +1311,11 @@ fn test_canvas_packed_screen_style_and_no_select_metadata_match_cc_helpers() {
 
     let mut pools = CanvasPackedCellPools::new();
     let mut packed = canvas.pack_with(&mut pools);
-    let mut highlighted_text = CanvasTextStyle::default();
-    highlighted_text.color = Some(Color::Yellow);
-    highlighted_text.weight = Weight::Bold;
+    let highlighted_text = CanvasTextStyle {
+        color: Some(Color::Yellow),
+        weight: Weight::Bold,
+        ..Default::default()
+    };
     let highlighted = CanvasResolvedStyle {
         text: highlighted_text,
         background_color: Some(Color::Blue),

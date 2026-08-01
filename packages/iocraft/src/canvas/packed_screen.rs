@@ -190,10 +190,6 @@ fn skip_escape_sequence_packed_clusters(clusters: &[CanvasPackedLineCluster], id
     }
 }
 
-/// A partial style that can be overlaid on an already-rendered [`CanvasCell`] without
-/// touching the original text or style. Each `None` field means "keep the original value";
-/// `Some(v)` means "override with `v`".
-
 /// Public width marker used by opt-in packed canvas snapshots.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum CanvasPackedCellWidth {
@@ -522,10 +518,11 @@ impl CanvasPackedCellPools {
     /// IDs, so [`CanvasPackedScreen::migrate_transient_pools`] can re-intern a
     /// retained packed screen without invalidating style references.
     pub fn fork_with_transient_pools_cleared(&self) -> Self {
-        let mut next = Self::default();
-        next.styles = self.styles.clone();
-        next.style_ids = self.style_ids.clone();
-        next
+        Self {
+            styles: self.styles.clone(),
+            style_ids: self.style_ids.clone(),
+            ..Self::default()
+        }
     }
 
     /// Clears only char/hyperlink pools while preserving style IDs.
@@ -976,6 +973,7 @@ impl CanvasPackedScreen {
     }
 
     /// Interns and writes one packed cell from typed text/style/link inputs.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_cell_text(
         &mut self,
         pools: &mut CanvasPackedCellPools,
@@ -1008,6 +1006,7 @@ impl CanvasPackedScreen {
     /// clusters do not mutate cells, and a wide grapheme at the right edge writes
     /// a `SpacerHead` placeholder instead of allowing terminal autowrap. The
     /// return value is the visual end column used by soft-wrap metadata.
+    #[allow(clippy::too_many_arguments)]
     pub fn write_line_with_ids(
         &mut self,
         pools: &mut CanvasPackedCellPools,
@@ -1116,6 +1115,7 @@ impl CanvasPackedScreen {
         offset_x
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_cached_clusters_clipped_with_ids(
         &mut self,
         pools: &mut CanvasPackedCellPools,
@@ -1441,6 +1441,7 @@ impl CanvasPackedScreen {
     }
 
     /// Interns style/link inputs and writes one logical line with a line cache.
+    #[allow(clippy::too_many_arguments)]
     pub fn write_line_with_cache(
         &mut self,
         pools: &mut CanvasPackedCellPools,
@@ -1881,6 +1882,7 @@ impl CanvasPackedScreen {
         (text, col_of_cell, byte_to_cell)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn scan_text_positions_absolute(
         &self,
         pools: &CanvasPackedCellPools,
@@ -3300,6 +3302,7 @@ fn clip_damage_region(region: DamageRegion, width: usize, height: usize) -> Opti
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn clip_packed_region(
     x: usize,
     y: usize,

@@ -206,22 +206,13 @@ impl<W: Write> Drop for TerminalRawInputModeGuard<W> {
 /// enabled. Set [`Self::enable_os_raw_mode`] to `true` only around a backend that
 /// owns stdin and can guarantee cleanup, matching the project boundary that raw
 /// stdin takeover is explicit and not the default crossterm path.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct TerminalRawInputSessionOptions {
     /// Terminal-side modes to enter while the caller-owned backend is active.
     pub terminal_modes: TerminalRawInputModeOptions,
     /// Whether to call crossterm `enable_raw_mode()` on enter and
     /// `disable_raw_mode()` on exit/drop.
     pub enable_os_raw_mode: bool,
-}
-
-impl Default for TerminalRawInputSessionOptions {
-    fn default() -> Self {
-        Self {
-            terminal_modes: TerminalRawInputModeOptions::default(),
-            enable_os_raw_mode: false,
-        }
-    }
 }
 
 /// Input backend selected by a render loop or terminal integration.

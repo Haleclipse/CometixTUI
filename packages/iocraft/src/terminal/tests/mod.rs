@@ -2614,7 +2614,7 @@ fn test_resize_event_triggers_terminal_mode_reassertion() {
     };
 
     term.start_event_stream().unwrap();
-    smol::block_on(term.wait());
+    smol::block_on(term.wait()).unwrap();
 
     assert_eq!(term.size(), Some((120, 40)));
     assert_eq!(
@@ -2662,7 +2662,10 @@ fn test_stdin_gap_reasserts_terminal_modes_like_cc_ink() {
     };
 
     term.start_event_stream().unwrap();
-    smol::block_on(term.wait());
+    // The mock stream ends after its events; stream exhaustion is the expected
+    // UnexpectedEof per the input-error propagation semantics.
+    let wait_result = smol::block_on(term.wait());
+    assert!(wait_result.is_err());
 
     assert_eq!(
         reasserts.load(Ordering::SeqCst),
@@ -2709,7 +2712,7 @@ fn test_same_size_resize_event_is_ignored() {
     };
 
     term.start_event_stream().unwrap();
-    smol::block_on(term.wait());
+    smol::block_on(term.wait()).unwrap();
 
     assert_eq!(term.size(), Some((120, 40)));
     assert_eq!(

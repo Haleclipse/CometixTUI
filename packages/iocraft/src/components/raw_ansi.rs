@@ -251,25 +251,13 @@ fn reorder_bidi_ansi_runs_for_terminal(runs: Vec<AnsiRun>) -> Vec<AnsiRun> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 struct AnsiState {
     style: CanvasTextStyle,
     background_color: Option<Color>,
     hyperlink: Option<String>,
     bold: bool,
     dim: bool,
-}
-
-impl Default for AnsiState {
-    fn default() -> Self {
-        Self {
-            style: CanvasTextStyle::default(),
-            background_color: None,
-            hyperlink: None,
-            bold: false,
-            dim: false,
-        }
-    }
 }
 
 impl AnsiState {
@@ -596,8 +584,8 @@ fn parse_ansi_impl(input: &str, stop_at_newline: bool) -> Vec<AnsiRun> {
 
     while i < input.len() {
         let rest = &input[i..];
-        if rest.starts_with("\x1b[") {
-            let Some(final_rel) = rest[2..].find(|ch: char| ('@'..='~').contains(&ch)) else {
+        if let Some(after_csi) = rest.strip_prefix("\x1b[") {
+            let Some(final_rel) = after_csi.find(|ch: char| ('@'..='~').contains(&ch)) else {
                 break;
             };
             let final_idx = i + 2 + final_rel;

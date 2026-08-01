@@ -162,6 +162,7 @@ impl CanvasSubviewMut<'_> {
     /// layout box. Coordinates are clipped to both the subview clip rect and the
     /// source canvas. Copied cells are marked damaged so terminal diff writers
     /// repaint post-render overlays even when the underlying text is unchanged.
+    #[allow(clippy::too_many_arguments)]
     pub fn blit_region_from(
         &mut self,
         src: &Canvas,
@@ -181,6 +182,7 @@ impl CanvasSubviewMut<'_> {
     /// only when the restored cells are known to match the previous terminal
     /// frame; otherwise the terminal writer may skip a repaint that is required
     /// to repair stale physical output.
+    #[allow(clippy::too_many_arguments)]
     pub fn blit_region_from_clean(
         &mut self,
         src: &Canvas,
@@ -194,6 +196,7 @@ impl CanvasSubviewMut<'_> {
         self.blit_region_from_impl(src, dst_x, dst_y, src_x, src_y, width, height, false);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn blit_region_from_impl(
         &mut self,
         src: &Canvas,
@@ -362,13 +365,11 @@ impl CanvasSubviewMut<'_> {
         let max_x = self.clip_x + self.clip_width as isize - 1;
         let min_y = self.clip_y.max(0);
         let max_y = (self.clip_y + self.clip_height as isize).min(self.canvas.height() as _) - 1;
-        let mut y = self.y + y;
-        for line in text.lines() {
+        for (y, line) in (self.y + y..).zip(text.lines()) {
             if y >= min_y && y <= max_y {
                 self.canvas
                     .set_text_row_str_clipped(x, y as usize, min_x, max_x, line, style, hyperlink);
             }
-            y += 1;
         }
     }
 }

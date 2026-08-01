@@ -705,9 +705,10 @@ pub(crate) struct ViewFocusParentContext {
 
 impl ViewFocusParentContext {
     pub(crate) fn shared_root() -> Self {
-        let mut context = Self::default();
-        context.shared_root_event_context = true;
-        context
+        Self {
+            shared_root_event_context: true,
+            ..Self::default()
+        }
     }
 
     pub(crate) fn begin_root_event_frame(&self) {
@@ -1057,7 +1058,7 @@ impl View {
     }
 
     fn repeat_border_char(ch: char, count: usize) -> String {
-        std::iter::repeat(ch).take(count).collect()
+        std::iter::repeat_n(ch, count).collect()
     }
 
     fn truncate_to_width(text: &str, max_width: usize) -> String {
@@ -3664,7 +3665,7 @@ mod tests {
                             && event.current_target.is_some()
                             && event.target != event.current_target
                         {
-                            let next = format!("{}pc>", &*parent_capture_log.read());
+                            let next = format!("{}pc>", *parent_capture_log.read());
                             let mut log = parent_capture_log;
                             log.set(next);
                         }
@@ -3676,7 +3677,7 @@ mod tests {
                             && event.current_target.is_some()
                             && event.target != event.current_target
                         {
-                            let next = format!("{}pb>", &*parent_bubble_log.read());
+                            let next = format!("{}pb>", *parent_bubble_log.read());
                             let mut log = parent_bubble_log;
                             log.set(next);
                         }
@@ -3691,7 +3692,7 @@ mod tests {
                                 && event.target.is_some()
                                 && event.target == event.current_target
                             {
-                                let next = format!("{}tc>", &*target_capture_log.read());
+                                let next = format!("{}tc>", *target_capture_log.read());
                                 let mut log = target_capture_log;
                                 log.set(next);
                             }
@@ -3702,7 +3703,7 @@ mod tests {
                                 && event.target.is_some()
                                 && event.target == event.current_target
                             {
-                                let next = format!("{}tb>", &*target_bubble_log.read());
+                                let next = format!("{}tb>", *target_bubble_log.read());
                                 let mut log = target_bubble_log;
                                 log.set(next);
                             }
@@ -4392,7 +4393,7 @@ mod tests {
                             && event.current_target.is_some()
                             && event.target != event.current_target
                         {
-                            let next = format!("{}pc>", &*parent_capture_log.read());
+                            let next = format!("{}pc>", *parent_capture_log.read());
                             let mut log = parent_capture_log;
                             log.set(next);
                         }
@@ -4403,7 +4404,7 @@ mod tests {
                             && event.current_target.is_some()
                             && event.target != event.current_target
                         {
-                            let next = format!("{}pb>", &*parent_bubble_log.read());
+                            let next = format!("{}pb>", *parent_bubble_log.read());
                             let mut log = parent_bubble_log;
                             log.set(next);
                         }
@@ -4417,7 +4418,7 @@ mod tests {
                                 && event.target.is_some()
                                 && event.target == event.current_target
                             {
-                                let next = format!("{}tc>", &*target_capture_log.read());
+                                let next = format!("{}tc>", *target_capture_log.read());
                                 let mut log = target_capture_log;
                                 log.set(next);
                             }
@@ -4427,7 +4428,7 @@ mod tests {
                                 && event.target.is_some()
                                 && event.target == event.current_target
                             {
-                                let next = format!("{}tb>", &*target_bubble_log.read());
+                                let next = format!("{}tb>", *target_bubble_log.read());
                                 let mut log = target_bubble_log;
                                 log.set(next);
                             }

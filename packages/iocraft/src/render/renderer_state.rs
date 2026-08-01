@@ -288,7 +288,7 @@ where
             .commit_node_plan_with_children(plan, |key| {
                 children
                     .get(key)
-                    .map(|children| children.iter().cloned().collect::<Vec<_>>())
+                    .map(|children| children.to_vec())
                     .unwrap_or_default()
             });
         if let Some(nodes) = dirty_nodes_to_clear {
@@ -313,7 +313,7 @@ where
         self.frame_state.cache_mut().remove_subtree(root, |key| {
             children
                 .get(key)
-                .map(|children| children.iter().cloned().collect::<Vec<_>>())
+                .map(|children| children.to_vec())
                 .unwrap_or_default()
         });
         let removed = self.dirty_tree.remove_subtree(root);

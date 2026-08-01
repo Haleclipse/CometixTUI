@@ -1009,8 +1009,6 @@ impl TerminalImpl for StdTerminal<'_> {
                     Ok(Event::FocusGained) => Some(Ok(TerminalEvent::FocusGained)),
                     Ok(Event::FocusLost) => Some(Ok(TerminalEvent::FocusLost)),
                     Ok(Event::Paste(text)) => Some(Ok(TerminalEvent::Paste(text))),
-                    // Ignore crossterm events that iocraft does not expose.
-                    Ok(_) => None,
                     Err(error) => Some(Err(error)),
                 }
             })

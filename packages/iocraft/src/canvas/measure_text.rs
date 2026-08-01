@@ -71,7 +71,7 @@ pub fn expand_tabs_with_interval(text: &str, interval: usize) -> String {
             match code {
                 b'\t' => {
                     let spaces = interval - (col % interval);
-                    result.extend(std::iter::repeat(' ').take(spaces));
+                    result.extend(std::iter::repeat_n(' ', spaces));
                     col += spaces;
                     idx += 1;
                 }

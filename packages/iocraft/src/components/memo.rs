@@ -10,7 +10,7 @@ pub fn memo_key_eq(previous_key: &str, next_key: &str) -> bool {
 
 /// The props which can be passed to the [`Memo`] component.
 #[non_exhaustive]
-#[derive(Props)]
+#[derive(Props, Default)]
 pub struct MemoProps<'a> {
     /// Caller-owned render key for the memoized subtree.
     pub memo_key: String,
@@ -19,16 +19,6 @@ pub struct MemoProps<'a> {
     pub compare: Option<MemoComparator>,
     /// The memoized subtree.
     pub children: Vec<AnyElement<'a>>,
-}
-
-impl Default for MemoProps<'_> {
-    fn default() -> Self {
-        Self {
-            memo_key: String::new(),
-            compare: None,
-            children: Vec::new(),
-        }
-    }
 }
 
 /// Opt-in memo wrapper.

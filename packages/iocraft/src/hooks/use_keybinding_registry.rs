@@ -135,11 +135,7 @@ pub fn parse_keybinding_chord(input: &str) -> ParsedChord {
     if input == " " {
         return vec![parse_keystroke("space")];
     }
-    input
-        .trim()
-        .split_whitespace()
-        .map(parse_keystroke)
-        .collect()
+    input.split_whitespace().map(parse_keystroke).collect()
 }
 
 /// Parses keybinding blocks into a flat list. Later entries win during resolution.
@@ -441,8 +437,7 @@ fn resolve_key_event_with_state(
 
     let exact = context_bindings
         .iter()
-        .filter(|binding| chord_exactly_matches(&test_chord, binding))
-        .last();
+        .rfind(|binding| chord_exactly_matches(&test_chord, binding));
     if let Some(binding) = exact {
         state.pending_chord = None;
         if let Some(action) = &binding.action {

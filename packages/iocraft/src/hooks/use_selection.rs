@@ -115,18 +115,10 @@ impl SharedSelectionSubscribers {
 /// Dropping the value removes the listener. Keep it in a hook such as
 /// [`use_const`](crate::hooks::UseConst::use_const) or application state for as
 /// long as you want to observe selection mutations.
+#[derive(Default)]
 pub struct SelectionSubscription {
     subscribers: Option<SharedSelectionSubscribers>,
     id: u64,
-}
-
-impl Default for SelectionSubscription {
-    fn default() -> Self {
-        Self {
-            subscribers: None,
-            id: 0,
-        }
-    }
 }
 
 impl Drop for SelectionSubscription {

@@ -1603,6 +1603,7 @@ impl Canvas {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn set_text_row_str_clipped(
         &mut self,
         mut x: isize,

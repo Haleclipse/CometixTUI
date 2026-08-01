@@ -224,22 +224,19 @@ fn test_scroll_fast_path_plan_matches_cc_ink_scrollbox_guards_and_regions() {
 
     assert_eq!(plan_scroll_fast_path(viewport, 0, []), None);
     assert_eq!(plan_scroll_fast_path(viewport, 5, []), None);
-    assert_eq!(
+    assert!(
         is_scroll_fast_path_content_delta_safe(3, 0),
-        true,
         "pure scroll is safe"
     );
-    assert_eq!(
+    assert!(
         is_scroll_fast_path_content_delta_safe(3, 3),
-        true,
         "bottom append matching the scroll delta is safe"
     );
-    assert_eq!(
-        is_scroll_fast_path_content_delta_safe(-3, -3),
-        false,
+    assert!(
+        !is_scroll_fast_path_content_delta_safe(-3, -3),
         "scroll-up plus shrink/removal must fall back to full render"
     );
-    assert_eq!(is_scroll_fast_path_content_delta_safe(3, 1), false);
+    assert!(!is_scroll_fast_path_content_delta_safe(3, 1));
 
     let plan = plan_scroll_fast_path(
         viewport,

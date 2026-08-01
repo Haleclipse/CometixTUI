@@ -599,7 +599,7 @@ mod tests {
         let log_for_parent = log;
         hooks.use_input_event(move |input, _key, _event| {
             if input == "x" {
-                let next = format!("{}parent", &*log_for_parent.read());
+                let next = format!("{}parent", *log_for_parent.read());
                 let mut log = log_for_parent;
                 log.set(next);
             }
@@ -614,7 +614,7 @@ mod tests {
         element! {
             View(flex_direction: FlexDirection::Column) {
                 StopChild(handler: move |message: String| {
-                    let next = format!("{}{}", &*log_for_child.read(), message);
+                    let next = format!("{}{}", *log_for_child.read(), message);
                     let mut log = log_for_child;
                     log.set(next);
                 })
