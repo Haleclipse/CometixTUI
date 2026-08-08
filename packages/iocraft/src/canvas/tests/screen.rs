@@ -183,6 +183,85 @@ fn test_canvas_full_background_color() {
     assert_eq!(actual, expected);
 }
 
+/// Maps to: CC Ink `colorize.ts:203-207`, where `bold` and `dim` are two
+/// independent attributes applied as separate chalk wrappers. ANSI gives them
+/// a single shared reset (SGR 22), so a differential writer must clear before
+/// switching — emitting SGR 1 while dim is still set leaves both active, which
+/// is the bold-next-to-dim hazard CC documents in `ToolUseLoader.tsx`.
+#[test]
+fn test_canvas_style_transition_clears_intensity_between_dim_and_bold() {
+    let sgr = |attr: Attribute| {
+        let mut out = Vec::new();
+        write!(out, csi!("{}m"), attr.sgr()).unwrap();
+        String::from_utf8(out).unwrap()
+    };
+    let style = |weight: Weight, dim: bool| CanvasResolvedStyle {
+        text: CanvasTextStyle {
+            weight,
+            dim,
+            ..Default::default()
+        },
+        background_color: None,
+    };
+
+    let default = CanvasResolvedStyle::default();
+    let dim = style(Weight::Normal, true);
+    let bold = style(Weight::Bold, false);
+    let bold_dim = style(Weight::Bold, true);
+
+    // Entering a single attribute needs no clear.
+    assert_eq!(
+        canvas_style_transition_to_ansi(default, dim),
+        sgr(Attribute::Dim)
+    );
+    assert_eq!(
+        canvas_style_transition_to_ansi(default, bold),
+        sgr(Attribute::Bold)
+    );
+
+    // Swapping between them clears first, then re-asserts.
+    assert_eq!(
+        canvas_style_transition_to_ansi(dim, bold),
+        format!(
+            "{}{}",
+            sgr(Attribute::NormalIntensity),
+            sgr(Attribute::Bold)
+        ),
+    );
+    assert_eq!(
+        canvas_style_transition_to_ansi(bold, dim),
+        format!("{}{}", sgr(Attribute::NormalIntensity), sgr(Attribute::Dim)),
+    );
+
+    // Both at once is a legal CC Ink combination; adding one to the other does
+    // not disturb the attribute already set.
+    assert_eq!(
+        canvas_style_transition_to_ansi(default, bold_dim),
+        format!("{}{}", sgr(Attribute::Bold), sgr(Attribute::Dim)),
+    );
+    assert_eq!(
+        canvas_style_transition_to_ansi(bold, bold_dim),
+        sgr(Attribute::Dim)
+    );
+    assert_eq!(
+        canvas_style_transition_to_ansi(dim, bold_dim),
+        sgr(Attribute::Bold)
+    );
+
+    // Leaving the combination clears exactly once, with no full SGR 0.
+    assert_eq!(
+        canvas_style_transition_to_ansi(bold_dim, default),
+        sgr(Attribute::NormalIntensity)
+    );
+
+    // `Weight::Light` stays the weight-side spelling of dim, so it must not
+    // re-emit when paired with the dedicated flag.
+    assert_eq!(
+        canvas_style_transition_to_ansi(style(Weight::Light, false), dim),
+        ""
+    );
+}
+
 #[test]
 fn test_canvas_style_transition_cache_matches_row_writer_sgr_order() {
     let default = CanvasResolvedStyle::default();
@@ -411,11 +490,15 @@ fn test_canvas_text_styles() {
     write!(expected, csi!("{}m"), Attribute::Bold.sgr()).unwrap();
     write!(expected, ".").unwrap();
 
+    // Bold and dim share SGR 22, so switching between them clears the
+    // intensity first — emitting SGR 2 alone would leave bold set too.
+    write!(expected, csi!("{}m"), Attribute::NormalIntensity.sgr()).unwrap();
     write!(expected, csi!("{}m"), Attribute::Dim.sgr()).unwrap();
     write!(expected, ".").unwrap();
 
-    write!(expected, csi!("0m")).unwrap();
-    write!(expected, csi!("{}m"), Colored::ForegroundColor(Color::Red)).unwrap();
+    // Leaving dim is now just SGR 22, so the red foreground survives instead
+    // of being torn down by a full reset and re-sent.
+    write!(expected, csi!("{}m"), Attribute::NormalIntensity.sgr()).unwrap();
     write!(expected, ".").unwrap();
 
     write!(

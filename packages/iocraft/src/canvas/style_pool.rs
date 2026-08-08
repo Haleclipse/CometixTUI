@@ -42,6 +42,16 @@ pub struct CanvasTextStyle {
     /// The weight of the text.
     pub weight: Weight,
 
+    /// Whether the text is dimmed (SGR 2), independent of [`Self::weight`].
+    ///
+    /// CC Ink models `bold` and `dim` as two independent booleans
+    /// (`ink/styles.ts` `TextStyles`) and applies both when both are set
+    /// (`ink/colorize.ts`: `if (styles.bold) …; if (styles.dim) …`). Folding
+    /// them into [`Weight`] alone would make `bold + dim` inexpressible, so
+    /// dim gets its own field. [`Weight::Light`] remains equivalent to dim for
+    /// callers that set the weight directly.
+    pub dim: bool,
+
     /// Whether the text is underlined.
     pub underline: bool,
 
@@ -71,12 +81,30 @@ pub struct CanvasTextStyle {
 }
 
 impl CanvasTextStyle {
+    /// Whether this style renders dimmed (SGR 2), whichever spelling set it.
+    ///
+    /// [`Self::dim`] is the CC Ink-aligned flag and [`Weight::Light`] is the
+    /// weight-side spelling of the same terminal attribute, so consumers that
+    /// only care about the rendered result ask through here instead of
+    /// checking both.
+    pub fn is_dim(&self) -> bool {
+        self.dim || self.weight == Weight::Light
+    }
+
+    /// Whether this style renders bold (SGR 1).
+    pub fn is_bold(&self) -> bool {
+        self.weight == Weight::Bold
+    }
+
     /// Produce a new style by merging an overlay on top of `self`.
     /// `None` fields in the overlay leave the original value; `Some` fields override.
     pub fn with_overlay(&self, o: &StyleOverlay) -> Self {
         Self {
             color: o.color.unwrap_or(self.color),
             weight: o.weight.unwrap_or(self.weight),
+            // Overlays exist for selection / search / cursor, none of which
+            // change intensity, so dim always rides through untouched.
+            dim: self.dim,
             underline: o.underline.unwrap_or(self.underline),
             underline_style: o.underline_style.unwrap_or(self.underline_style),
             underline_color: o.underline_color.unwrap_or(self.underline_color),
@@ -141,6 +169,39 @@ impl From<CanvasTextStyle> for CanvasResolvedStyle {
     }
 }
 
+/// Writes the SGR intensity transition between two text styles.
+///
+/// Maps to: CC Ink `colorize.ts:203-207`, which applies `bold` and `dim` as
+/// two independent chalk wrappers, each emitting its own open/close pair. ANSI
+/// instead models them as two flags sharing one reset code (SGR 22), so a
+/// differential writer must route every "turn something off" through 22 and
+/// then re-assert whatever stays on. Emitting SGR 1 while dim is still set
+/// would leave both active — which is exactly the bold-next-to-dim hazard CC
+/// documents in `ToolUseLoader.tsx`.
+pub(super) fn write_intensity_transition<W: Write>(
+    mut w: W,
+    from: CanvasTextStyle,
+    to: CanvasTextStyle,
+) -> io::Result<()> {
+    let from_bold = from.is_bold();
+    let from_dim = from.is_dim();
+    let to_bold = to.is_bold();
+    let to_dim = to.is_dim();
+
+    let needs_clear = (from_bold && !to_bold) || (from_dim && !to_dim);
+    if needs_clear {
+        sgr_attr(&mut w, Attribute::NormalIntensity)?;
+    }
+    // After a clear both flags are gone, so anything still wanted is re-sent.
+    if to_bold && (needs_clear || !from_bold) {
+        sgr_attr(&mut w, Attribute::Bold)?;
+    }
+    if to_dim && (needs_clear || !from_dim) {
+        sgr_attr(&mut w, Attribute::Dim)?;
+    }
+    Ok(())
+}
+
 pub(super) fn write_canvas_style_transition<W: Write>(
     mut w: W,
     from: CanvasResolvedStyle,
@@ -151,10 +212,9 @@ pub(super) fn write_canvas_style_transition<W: Write>(
     let effective_style = to.text;
     let effective_bg = to.background_color;
 
+    // Intensity (bold / dim) is handled by `write_intensity_transition` below;
+    // it has its own reset code (SGR 22) and must not force a full SGR 0.
     let mut needs_reset = false;
-    if effective_style.weight != text_style.weight && effective_style.weight == Weight::Normal {
-        needs_reset = true;
-    }
     if !effective_style.underline && text_style.underline {
         needs_reset = true;
     }
@@ -193,13 +253,7 @@ pub(super) fn write_canvas_style_transition<W: Write>(
         )?;
     }
 
-    if effective_style.weight != text_style.weight {
-        match effective_style.weight {
-            Weight::Bold => sgr_attr(&mut w, Attribute::Bold)?,
-            Weight::Normal => {}
-            Weight::Light => sgr_attr(&mut w, Attribute::Dim)?,
-        }
-    }
+    write_intensity_transition(&mut w, text_style, effective_style)?;
 
     if effective_style.underline
         && (!text_style.underline || effective_style.underline_style != text_style.underline_style)

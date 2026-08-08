@@ -69,12 +69,17 @@ pub struct TextProps {
     /// The weight of the text.
     pub weight: Weight,
 
-    /// CC Ink-style alias for [`Weight::Bold`]. If both `bold` and `dim` are
-    /// set dynamically, `dim` wins to match the CC Ink ANSI span wrapper.
+    /// CC Ink-style alias for [`Weight::Bold`] (`ink/styles.ts` `bold`).
+    ///
+    /// Independent of [`Self::dim`]: setting both yields bold *and* dim, which
+    /// is what CC Ink produces by applying both chalk wrappers
+    /// (`ink/colorize.ts:203-207`).
     pub bold: bool,
 
-    /// CC Ink-style alias for [`Weight::Light`] / SGR dim. This takes
-    /// precedence over [`Self::bold`] and [`Self::weight`].
+    /// CC Ink-style alias for SGR dim (`ink/styles.ts` `dim`).
+    ///
+    /// Independent of [`Self::bold`]; [`Weight::Light`] is the weight-side
+    /// spelling of the same attribute.
     pub dim: bool,
 
     /// The text wrapping behavior.
@@ -526,13 +531,18 @@ impl Component for Text {
     ) {
         self.style = CanvasTextStyle {
             color: props.color,
-            weight: if props.dim {
-                Weight::Light
-            } else if props.bold {
+            // `bold` and `dim` are independent attributes in CC Ink, so `dim`
+            // gets its own flag and no longer erases `bold`. `Weight::Light`
+            // stays the weight-side spelling for dim-only text, which is what
+            // `MixedTextContent` and direct `weight:` callers use.
+            weight: if props.bold {
                 Weight::Bold
+            } else if props.dim {
+                Weight::Light
             } else {
                 props.weight
             },
+            dim: props.dim,
             underline: props.underline || props.decoration == TextDecoration::Underline,
             underline_style: UnderlineStyle::Single,
             underline_color: None,
@@ -714,11 +724,12 @@ mod tests {
         }
 
         {
+            // CC Ink applies both wrappers (`ink/colorize.ts:203-207`), so the
+            // two attributes coexist rather than one overriding the other.
             let canvas = element!(Text(content: "dim", bold: true, dim: true)).render(None);
-            assert_eq!(
-                canvas.resolved_text_style(0, 0).unwrap().weight,
-                Weight::Light
-            );
+            let style = canvas.resolved_text_style(0, 0).unwrap();
+            assert_eq!(style.weight, Weight::Bold);
+            assert!(style.dim);
         }
 
         {

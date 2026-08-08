@@ -40,12 +40,10 @@ impl Canvas {
             };
 
             if ansi && has_style {
+                // Intensity (bold / dim) goes through
+                // `write_intensity_transition`, which owns SGR 22; it must not
+                // force a full SGR 0 here.
                 let mut needs_reset = false;
-                if effective_style.weight != text_style.weight
-                    && effective_style.weight == Weight::Normal
-                {
-                    needs_reset = true;
-                }
                 if !effective_style.underline && text_style.underline {
                     needs_reset = true;
                 }
@@ -84,13 +82,7 @@ impl Canvas {
                     )?;
                 }
 
-                if effective_style.weight != text_style.weight {
-                    match effective_style.weight {
-                        Weight::Bold => sgr_attr(&mut w, Attribute::Bold)?,
-                        Weight::Normal => {}
-                        Weight::Light => sgr_attr(&mut w, Attribute::Dim)?,
-                    }
-                }
+                write_intensity_transition(&mut w, text_style, effective_style)?;
 
                 if effective_style.underline
                     && (!text_style.underline
@@ -230,7 +222,8 @@ impl Canvas {
                 || text_style.strikethrough
                 || text_style.overline
                 || text_style.invert
-                || text_style.weight != Weight::Normal;
+                || text_style.weight != Weight::Normal
+                || text_style.dim;
             if needs_reset {
                 sgr_reset(&mut w)?;
             }

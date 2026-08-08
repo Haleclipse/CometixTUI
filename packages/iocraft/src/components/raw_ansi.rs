@@ -269,13 +269,18 @@ impl AnsiState {
     }
 
     fn update_intensity(&mut self) {
-        self.style.weight = if self.dim {
-            Weight::Light
-        } else if self.bold {
+        // SGR 1 and SGR 2 are independent flags on the wire, and CC Ink models
+        // them the same way (`ink/styles.ts`: `bold` and `dim` booleans). The
+        // parsed style keeps them apart instead of collapsing both into one
+        // weight, which used to drop `bold` whenever `dim` was also set.
+        self.style.weight = if self.bold {
             Weight::Bold
+        } else if self.dim {
+            Weight::Light
         } else {
             Weight::Normal
         };
+        self.style.dim = self.dim;
     }
 }
 

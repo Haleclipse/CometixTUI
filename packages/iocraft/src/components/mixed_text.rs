@@ -349,6 +349,9 @@ impl MixedText {
         CanvasTextStyle {
             color: content.color,
             weight: content.weight,
+            // Mixed-text segments carry no separate dim flag; `Weight::Light`
+            // remains their spelling of it.
+            dim: false,
             underline: content.decoration == TextDecoration::Underline,
             underline_style: UnderlineStyle::Single,
             underline_color: None,
