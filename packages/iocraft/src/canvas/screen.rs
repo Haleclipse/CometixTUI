@@ -1841,10 +1841,13 @@ impl Canvas {
         }
     }
 
-    pub(super) fn row(&self, y: usize) -> &[CanvasCell] {
-        let Some(row) = self.cells.get(y) else {
-            return &[];
-        };
+    /// Returns the row's cells with trailing render-insignificant cells trimmed.
+    ///
+    /// `None` means the row does not exist, which is distinct from an existing
+    /// but empty row: [`Self::row_eq`] must not treat a canvas that is shorter
+    /// than another as equal to that other canvas's blank rows.
+    pub(super) fn row(&self, y: usize) -> Option<&[CanvasCell]> {
+        let row = self.cells.get(y)?;
         let overlay_row = self.overlays.get(y);
         // A cell counts as render-significant if it has visible content, visible
         // background/style, a hyperlink, or a visible overlay. Plain trailing spaces
@@ -1854,17 +1857,18 @@ impl Canvas {
             let overlay = overlay_row.and_then(|r| r.get(x)).and_then(|o| o.as_ref());
             !cell.is_row_trim_empty(overlay)
         });
-        &row[..last_non_empty.map_or(0, |i| i + 1)]
+        Some(&row[..last_non_empty.map_or(0, |i| i + 1)])
     }
 
-    /// Returns the row's overlays with trailing `None` entries trimmed, so that an
-    /// out-of-bounds row and an existing-but-overlay-free row compare as equal.
-    pub(super) fn overlay_row(&self, y: usize) -> &[Option<StyleOverlay>] {
-        let Some(row) = self.overlays.get(y) else {
-            return &[];
-        };
+    /// Returns the row's overlays with trailing `None` entries trimmed.
+    ///
+    /// `None` means the row does not exist; an existing row with no overlays
+    /// yields an empty slice. Keeping the two apart is what lets [`Self::row_eq`]
+    /// report a size change instead of matching a missing row against a blank one.
+    pub(super) fn overlay_row(&self, y: usize) -> Option<&[Option<StyleOverlay>]> {
+        let row = self.overlays.get(y)?;
         let last_some = row.iter().rposition(|o| o.is_some());
-        &row[..last_some.map_or(0, |i| i + 1)]
+        Some(&row[..last_some.map_or(0, |i| i + 1)])
     }
 
     /// Returns the terminal column reached after rendering a row from column 0.
@@ -1875,7 +1879,7 @@ impl Canvas {
     /// the inline renderer can track whether a write actually ended in VT autowrap's
     /// pending-wrap state instead of assuming `canvas.width()` was reached.
     pub(crate) fn ansi_row_rendered_width(&self, y: usize) -> usize {
-        let row = self.row(y);
+        let row = self.row(y).unwrap_or(&[]);
         let mut rendered_width = 0;
         for (x, cell) in row.iter().enumerate() {
             if matches!(
@@ -1956,7 +1960,10 @@ impl Canvas {
             .flatten()
             .min();
 
-        let max_len = self.row(y).len().max(other.row(y).len());
+        let max_len = self
+            .row(y)
+            .map_or(0, <[CanvasCell]>::len)
+            .max(other.row(y).map_or(0, <[CanvasCell]>::len));
         let diff_start = (0..max_len).find(|&x| {
             self.cell_for_diff(y, x) != other.cell_for_diff(y, x)
                 || self.overlay_for_diff(y, x) != other.overlay_for_diff(y, x)

@@ -395,7 +395,7 @@ impl CanvasAnsiRowCache {
         mut w: W,
     ) -> io::Result<()> {
         let key = (y, start_col);
-        let row = canvas.row(y).to_vec();
+        let row = canvas.row(y).unwrap_or(&[]).to_vec();
         let overlays = canvas
             .overlays
             .get(y)

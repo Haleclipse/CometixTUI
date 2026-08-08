@@ -8,7 +8,7 @@ impl Canvas {
         ansi: bool,
         start_col: usize,
     ) -> io::Result<()> {
-        let row = self.row(y);
+        let row = self.row(y).unwrap_or(&[]);
         let overlay_row = self.overlays.get(y);
 
         let mut background_color = None;

@@ -115,8 +115,14 @@ fn test_row_eq_out_of_bounds() {
     let a = Canvas::new(10, 1);
     let b = Canvas::new(10, 2);
 
-    // row 1 is out of bounds for a, but exists (empty) in b
-    assert!(a.row_eq(&b, 1));
+    // Row 1 is out of bounds for a but exists (empty) in b. A missing row is
+    // not the same as a blank one: treating them as equal would let the
+    // row-level diff skip the height change and leave the extra row unpainted.
+    assert!(!a.row_eq(&b, 1));
+    assert!(!b.row_eq(&a, 1));
+
+    // Both out of bounds still compares equal.
+    assert!(a.row_eq(&b, 5));
 }
 
 /// Regression guard for the row-level diff renderer: a row whose cells are
