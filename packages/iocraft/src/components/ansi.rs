@@ -13,7 +13,15 @@ pub struct AnsiProps {
     pub content: String,
 
     /// Force dim styling for all parsed text, matching CC Ink's `dimColor` prop.
+    /// Like CC's direct prop, this overrides explicit bold spans.
     pub dim_color: bool,
+
+    /// Dim styling inherited from a parent CC Ink `Text` node.
+    ///
+    /// This stays separate from [`Self::dim_color`]: inherited dim merges with
+    /// a nested ANSI span's explicit bold, while direct `dim_color` is applied
+    /// by CC's `StyledText` and suppresses that span's bold.
+    pub inherited_dim: bool,
 
     /// Default text color inherited by ANSI spans without an explicit SGR color.
     pub color: Option<Color>,
@@ -28,8 +36,9 @@ pub struct AnsiProps {
     pub align: TextAlign,
 }
 
-/// Parses ANSI escape sequences and renders them as styled text segments.
+/// Maps to CC `ink/Ansi.tsx#Ansi:35-117`.
 ///
+/// Parses ANSI escape sequences and renders them as styled text segments.
 /// This is the iocraft counterpart to CC Ink's `<Ansi>` helper. It is useful
 /// when an external producer emits ANSI-styled strings but the UI should still
 /// participate in normal layout, wrapping, selection, search, and OSC 8
@@ -42,11 +51,16 @@ pub fn Ansi(props: &AnsiProps) -> impl Into<AnyElement<'static>> {
             let mut content = MixedTextContent::new(run.text);
             content.color = run.style.color.or(props.color);
             content.background_color = run.background_color;
-            content.weight = if props.dim_color {
+            // CC Ansi's StyledText gives a span's own dim precedence over its
+            // own bold. Direct dimColor forces that same span-local dim branch.
+            // Parent dim is different: squashTextNodes merges it independently
+            // with the nested span, so it rides through `MixedTextContent::dim`.
+            content.weight = if props.dim_color || run.style.dim {
                 Weight::Light
             } else {
                 run.style.weight
             };
+            content.dim = props.dim_color || props.inherited_dim || run.style.dim;
             content.decoration = if run.style.underline {
                 TextDecoration::Underline
             } else {
@@ -131,14 +145,63 @@ mod tests {
         .render(None);
 
         assert_eq!(canvas.to_string(), "link\n");
-        assert_eq!(
-            canvas.resolved_text_style(0, 0).unwrap().weight,
-            Weight::Light
-        );
+        let style = canvas.resolved_text_style(0, 0).unwrap();
+        assert_eq!(style.weight, Weight::Light);
+        assert!(style.dim);
+        assert!(style.is_dim());
         assert_eq!(
             canvas.hyperlink_at(0, 0).as_deref(),
             Some("https://example.com")
         );
+    }
+
+    #[test]
+    fn test_ansi_component_dim_color_overrides_explicit_bold_like_cc_prop() {
+        let canvas = element!(Ansi(
+            dim_color: true,
+            content: "dim \x1b[1mbold\x1b[22m dim".to_string(),
+        ))
+        .render(None);
+
+        for column in [0, 4, 9] {
+            let style = canvas.resolved_text_style(column, 0).unwrap();
+            assert_eq!(style.weight, Weight::Light);
+            assert!(style.dim);
+            assert!(style.is_dim());
+        }
+    }
+
+    #[test]
+    fn test_ansi_component_span_dim_overrides_span_bold_like_cc_styled_text() {
+        let canvas = element!(Ansi(
+            content: "\x1b[1;2mboth\x1b[22m".to_string(),
+        ))
+        .render(None);
+
+        let style = canvas.resolved_text_style(0, 0).unwrap();
+        assert_eq!(style.weight, Weight::Light);
+        assert!(style.dim);
+        assert!(style.is_dim());
+    }
+
+    #[test]
+    fn test_ansi_component_inherited_dim_preserves_explicit_bold() {
+        let canvas = element!(Ansi(
+            inherited_dim: true,
+            content: "dim \x1b[1mbold\x1b[22m dim".to_string(),
+        ))
+        .render(None);
+
+        for column in [0, 9] {
+            let style = canvas.resolved_text_style(column, 0).unwrap();
+            assert_eq!(style.weight, Weight::Normal);
+            assert!(style.dim);
+            assert!(style.is_dim());
+        }
+        let bold = canvas.resolved_text_style(4, 0).unwrap();
+        assert_eq!(bold.weight, Weight::Bold);
+        assert!(bold.dim);
+        assert!(bold.is_dim());
     }
 
     #[test]

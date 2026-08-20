@@ -22,6 +22,9 @@ pub struct MixedTextContent {
     /// The weight of the text.
     pub weight: Weight,
 
+    /// Whether to dim the text independently of [`Self::weight`].
+    pub dim: bool,
+
     /// The text decoration.
     pub decoration: TextDecoration,
 
@@ -71,6 +74,14 @@ impl MixedTextContent {
     /// Returns a new [`MixedTextContent`] with the given text decoration.
     pub fn decoration(mut self, decoration: TextDecoration) -> Self {
         self.decoration = decoration;
+        self
+    }
+
+    /// Returns a new [`MixedTextContent`] with dimmed text, independent of
+    /// [`Self::weight`]. Combining it with [`Weight::Bold`] renders both
+    /// attributes, matching CC Ink's independent `bold`/`dim` booleans.
+    pub fn dim(mut self) -> Self {
+        self.dim = true;
         self
     }
 
@@ -349,9 +360,7 @@ impl MixedText {
         CanvasTextStyle {
             color: content.color,
             weight: content.weight,
-            // Mixed-text segments carry no separate dim flag; `Weight::Light`
-            // remains their spelling of it.
-            dim: false,
+            dim: content.dim,
             underline: content.decoration == TextDecoration::Underline,
             underline_style: UnderlineStyle::Single,
             underline_color: None,
@@ -620,6 +629,17 @@ mod tests {
             )),
             "hello world"
         );
+    }
+
+    #[test]
+    fn test_mixed_text_preserves_independent_bold_and_dim() {
+        let content = MixedTextContent::new("both").weight(Weight::Bold).dim();
+        let canvas = element!(MixedText(contents: vec![content])).render(None);
+
+        let style = canvas.resolved_text_style(0, 0).expect("mixed text style");
+        assert_eq!(style.weight, Weight::Bold);
+        assert!(style.dim);
+        assert!(style.is_dim());
     }
 
     #[test]
