@@ -858,7 +858,7 @@ impl TerminalImpl for StdTerminal<'_> {
         }
 
         if self.inline_force_full_rewrite_next_diff || self.inline_resize_requires_full_rewrite() {
-            self.clear_canvas()?;
+            self.clear_inline_for_full_rewrite(prev.height(), canvas.height())?;
             self.prev_canvas_height = canvas.height() as _;
             self.prev_size_on_write = self.size;
             self.write_inline_canvas_without_final_newline(canvas)?;
@@ -875,7 +875,7 @@ impl TerminalImpl for StdTerminal<'_> {
                 return Ok(());
             }
 
-            self.clear_canvas()?;
+            self.clear_inline_for_full_rewrite(prev.height(), canvas.height())?;
             self.prev_canvas_height = canvas.height() as _;
             self.prev_size_on_write = self.size;
             self.write_inline_canvas_without_final_newline(canvas)?;
@@ -889,8 +889,9 @@ impl TerminalImpl for StdTerminal<'_> {
         let new_height = canvas.height();
 
         if self.inline_shrink_requires_full_rewrite(prev_height, new_height) {
-            self.clear_canvas()?;
+            self.clear_inline_for_full_rewrite(prev_height, new_height)?;
             self.prev_canvas_height = canvas.height() as _;
+            self.prev_size_on_write = self.size;
             self.write_inline_canvas_without_final_newline(canvas)?;
             self.inline_force_full_rewrite_next_diff = false;
             return Ok(());
@@ -916,8 +917,9 @@ impl TerminalImpl for StdTerminal<'_> {
                 if prev.row_eq(canvas, y) {
                     continue;
                 }
-                self.clear_canvas()?;
+                self.clear_inline_for_full_rewrite(prev_height, new_height)?;
                 self.prev_canvas_height = canvas.height() as _;
+                self.prev_size_on_write = self.size;
                 self.write_inline_canvas_without_final_newline(canvas)?;
                 self.inline_force_full_rewrite_next_diff = false;
                 return Ok(());
@@ -1174,6 +1176,45 @@ impl<'a> StdTerminal<'a> {
         }
         self.dest.write_all(b"\x1b[r\x1b[H")?;
         Ok(())
+    }
+
+    /// Maps to CC `ink/log-update.ts#LogUpdate.render` automatic resize /
+    /// offscreen full-reset branches and `fullResetSequence_CAUSES_FLICKER`.
+    /// Explicit `clear_canvas()` remains screen-only; only resize/offscreen
+    /// automatic fallbacks purge native scrollback.
+    fn clear_inline_for_full_rewrite(
+        &mut self,
+        prev_height: usize,
+        next_height: usize,
+    ) -> io::Result<()> {
+        let (Some((prev_width, prev_viewport_height)), Some((next_width, next_viewport_height))) =
+            (self.prev_size_on_write, self.size)
+        else {
+            return self.clear_canvas();
+        };
+        if prev_width == 0
+            || prev_viewport_height == 0
+            || next_width == 0
+            || next_viewport_height == 0
+        {
+            return self.clear_canvas();
+        }
+        let prev = TerminalFrameBounds {
+            screen_height: prev_height,
+            viewport_width: prev_width as usize,
+            viewport_height: prev_viewport_height as usize,
+        };
+        let next = TerminalFrameBounds {
+            screen_height: next_height,
+            viewport_width: next_width as usize,
+            viewport_height: next_viewport_height as usize,
+        };
+        match should_clear_terminal_screen(prev, next) {
+            Some(TerminalClearReason::Resize | TerminalClearReason::Offscreen) => {
+                self.clear_terminal()
+            }
+            Some(TerminalClearReason::Clear) | None => self.clear_canvas(),
+        }
     }
 
     fn inline_resize_requires_full_rewrite(&self) -> bool {

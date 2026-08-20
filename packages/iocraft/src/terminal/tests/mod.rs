@@ -880,6 +880,7 @@ fn new_inline_term_with_size(
 fn inline_diff_vt(prev: &Canvas, next: &Canvas, term_size: (u16, u16)) -> (Vec<u8>, avt::Vt) {
     let (dest, diff_buf) = new_test_writer();
     let mut term = new_inline_term_with_size(dest, prev.height() as _, term_size);
+    term.prev_size_on_write = term.size;
     term.write_canvas(Some(prev), next).unwrap();
 
     let diff = diff_buf.lock().unwrap().clone();
@@ -890,6 +891,18 @@ fn inline_diff_vt(prev: &Canvas, next: &Canvas, term_size: (u16, u16)) -> (Vec<u
     let mut vt = avt::Vt::new(term_size.0 as _, term_size.1 as _);
     vt.feed_str(&String::from_utf8(setup).unwrap());
     (diff, vt)
+}
+
+fn assert_inline_full_reset(diff: &[u8], context: &str) {
+    let diff = String::from_utf8_lossy(diff);
+    assert!(
+        diff.contains("\x1b[2J\x1b[3J\x1b[H"),
+        "{context} should use the CC Ink full reset sequence: {diff:?}"
+    );
+    assert!(
+        !diff.contains("\x1b[?1049h") && !diff.contains("\x1b[?1049l"),
+        "{context} must not enter or leave fullscreen: {diff:?}"
+    );
 }
 
 #[test]
@@ -3825,11 +3838,9 @@ fn test_inline_resize_forces_full_rewrite_even_when_canvas_identical() {
     term.prev_size_on_write = Some((12, 5));
     term.write_canvas(Some(&canvas), &canvas).unwrap();
 
-    let diff = String::from_utf8_lossy(&diff_buf.lock().unwrap().clone()).to_string();
-    assert!(
-        diff.contains("\x1b[J"),
-        "resize reset should clear the old inline canvas: {diff:?}"
-    );
+    let raw_diff = diff_buf.lock().unwrap().clone();
+    assert_inline_full_reset(&raw_diff, "resize rewrite");
+    let diff = String::from_utf8_lossy(&raw_diff).to_string();
     assert!(
         diff.contains("hello") && diff.contains("world"),
         "resize reset should repaint the full canvas: {diff:?}"
@@ -4112,11 +4123,7 @@ fn test_inline_diff_full_viewport_top_row_change_full_rewrite() {
         .set_text(0, 0, "TOP", style);
 
     let (diff, vt) = inline_diff_vt(&prev, &next, (10, 5));
-    let diff_str = String::from_utf8_lossy(&diff);
-    assert!(
-        diff_str.contains("\x1b[2J"),
-        "expected full reset for top row after full-viewport frame: {diff_str:?}"
-    );
+    assert_inline_full_reset(&diff, "full-viewport top-row rewrite");
     assert_eq!(vt.line(0).text(), "TOP0      ");
     assert_eq!(vt.line(4).text(), "row4      ");
 }
@@ -4140,11 +4147,7 @@ fn test_inline_diff_tall_canvas_top_visible_change_full_rewrite() {
         .set_text(0, 3, "TOPVIS", style);
 
     let (diff, vt) = inline_diff_vt(&prev, &next, (10, 5));
-    let diff_str = String::from_utf8_lossy(&diff);
-    assert!(
-        diff_str.contains("\x1b[2J"),
-        "expected full reset for cursorRestoreScroll top visible row: {diff_str:?}"
-    );
+    assert_inline_full_reset(&diff, "tall-canvas top-visible rewrite");
     assert_eq!(vt.line(0).text(), "TOPVIS    ");
     assert_eq!(vt.line(4).text(), "row7      ");
 }
@@ -4173,13 +4176,7 @@ fn test_inline_diff_tall_canvas_offscreen_change() {
 
     let (diff, vt) = inline_diff_vt(&prev, &next, (10, 5));
 
-    // Should contain a full clear (ClearAll = ESC[2J, because
-    // prev_canvas_height >= term_height triggers the heavy clear path).
-    let diff_str = String::from_utf8_lossy(&diff);
-    assert!(
-        diff_str.contains("\x1b[2J"),
-        "expected full clear fallback; got: {diff_str:?}"
-    );
+    assert_inline_full_reset(&diff, "tall-canvas offscreen-row rewrite");
 
     // After full rewrite, the bottom 5 rows of the new canvas are visible.
     assert_eq!(vt.line(0).text(), "row3      ");
@@ -4208,14 +4205,74 @@ fn test_inline_diff_shrinking_from_scrollback_to_viewport_full_rewrite() {
     }
 
     let (diff, vt) = inline_diff_vt(&prev, &next, (10, 5));
-    let diff_str = String::from_utf8_lossy(&diff);
-    assert!(
-        diff_str.contains("\x1b[2J"),
-        "expected full clear fallback for shrink->fits; got: {diff_str:?}"
-    );
+    assert_inline_full_reset(&diff, "shrink-to-viewport rewrite");
     assert_eq!(vt.line(0).text(), "new0      ");
     assert_eq!(vt.line(4).text(), "new4      ");
     assert_eq!(vt.cursor().row, 4);
+}
+
+#[test]
+fn test_inline_automatic_full_rewrites_restore_geometry_for_follow_up_resets() {
+    let style = CanvasTextStyle::default();
+    let tall_canvas = |changed_row: usize, label: &str| {
+        let mut canvas = Canvas::new(10, 8);
+        for y in 0..8 {
+            canvas.subview_mut(0, 0, 0, 0, 10, 8).set_text(
+                0,
+                y as isize,
+                &format!("row{y}"),
+                style,
+            );
+        }
+        canvas
+            .subview_mut(0, 0, 0, 0, 10, 8)
+            .set_text(0, changed_row as isize, label, style);
+        canvas
+    };
+
+    // An unreachable-row rewrite calls clear_terminal(), which resets retained
+    // geometry. The rewrite must install the new frame as the next baseline so
+    // another unreachable change still purges scrollback rather than falling
+    // back to the geometry-unavailable clear_canvas() path.
+    let first = tall_canvas(0, "row0");
+    let second = tall_canvas(1, "OFF1");
+    let third = tall_canvas(2, "OFF2");
+    let (dest, diff_buf) = new_test_writer();
+    let mut term = new_inline_term_with_size(dest, first.height() as _, (10, 5));
+    term.prev_size_on_write = term.size;
+    term.write_canvas(Some(&first), &second).unwrap();
+    assert_eq!(term.prev_size_on_write, term.size);
+
+    diff_buf.lock().unwrap().clear();
+    term.write_canvas(Some(&second), &third).unwrap();
+    let second_reset = diff_buf.lock().unwrap().clone();
+    assert_inline_full_reset(&second_reset, "follow-up offscreen rewrite");
+    assert_eq!(term.prev_size_on_write, term.size);
+
+    // The shrink-to-viewport branch has the same obligation. Its next
+    // full-viewport top-row change must retain enough geometry to choose the
+    // scrollback-purging reset again.
+    let tall = tall_canvas(0, "row0");
+    let mut fit = Canvas::new(10, 5);
+    for y in 0..5 {
+        fit.subview_mut(0, 0, 0, 0, 10, 5)
+            .set_text(0, y as isize, &format!("fit{y}"), style);
+    }
+    let mut fit_changed = fit.clone();
+    fit_changed
+        .subview_mut(0, 0, 0, 0, 10, 5)
+        .set_text(0, 0, "TOP", style);
+    let (dest, diff_buf) = new_test_writer();
+    let mut term = new_inline_term_with_size(dest, tall.height() as _, (10, 5));
+    term.prev_size_on_write = term.size;
+    term.write_canvas(Some(&tall), &fit).unwrap();
+    assert_eq!(term.prev_size_on_write, term.size);
+
+    diff_buf.lock().unwrap().clear();
+    term.write_canvas(Some(&fit), &fit_changed).unwrap();
+    let second_reset = diff_buf.lock().unwrap().clone();
+    assert_inline_full_reset(&second_reset, "post-shrink full-viewport rewrite");
+    assert_eq!(term.prev_size_on_write, term.size);
 }
 
 #[test]
