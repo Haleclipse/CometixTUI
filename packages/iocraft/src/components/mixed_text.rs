@@ -180,7 +180,7 @@ impl MixedText {
     /// this component's wrapping, truncation, bidi, or drawing engine.
     pub(crate) fn update_contents(
         &mut self,
-        contents: &mut [MixedTextContent],
+        mut contents: Vec<MixedTextContent>,
         wrap: TextWrap,
         align: TextAlign,
         updater: &mut ComponentUpdater,
@@ -193,7 +193,7 @@ impl MixedText {
             .map(|content| content.text.as_str())
             .collect::<Vec<_>>()
             .join("");
-        self.contents = contents.to_vec();
+        self.contents = contents;
         self.wrap = wrap;
         self.align = align;
         updater.set_measure_func(Text::measure_func(plaintext, wrap));
@@ -449,7 +449,7 @@ impl Component for MixedText {
         _hooks: Hooks,
         updater: &mut ComponentUpdater,
     ) {
-        self.update_contents(&mut props.contents, props.wrap, props.align, updater);
+        self.update_contents(props.contents.clone(), props.wrap, props.align, updater);
     }
 
     fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {

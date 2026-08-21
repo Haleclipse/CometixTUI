@@ -638,7 +638,7 @@ impl Component for Text {
             }
             self.structured = true;
             self.mixed_text
-                .update_contents(&mut contents, props.wrap, props.align, updater);
+                .update_contents(contents, props.wrap, props.align, updater);
             return;
         }
 
