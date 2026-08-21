@@ -155,6 +155,10 @@ pub struct TextInputProps {
     /// - **ink model** (`false`, default): the cursor is rendered as an inverted cell.
     ///   The physical cursor is positioned for IME but hidden.
     pub physical_cursor: bool,
+
+    /// If true (requires [`Self::multiline`]), the input auto-grows its height
+    /// to fit wrapped content instead of filling its container's height.
+    pub auto_grow: bool,
 }
 
 trait UseSize<'a> {
@@ -192,6 +196,10 @@ struct TextBuffer {
 }
 
 impl TextBuffer {
+    fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
     fn new<S: Into<String>>(text: S, width: usize) -> Self {
         let text = text.into();
         let s = SegmentedString::from(text.as_str());
@@ -310,6 +318,7 @@ struct TextBufferViewProps {
     underline: bool,
     italic: bool,
     invert: bool,
+    auto_grow: bool,
     buffer: Arc<TextBuffer>,
 }
 
@@ -341,15 +350,31 @@ impl Component for TextBufferView {
             ..Default::default()
         };
         self.buffer = props.buffer.clone();
-        updater.set_layout_style_if_changed(
-            LayoutStyle {
-                position: Position::Absolute,
-                top: 0.into(),
-                left: 0.into(),
-                ..Default::default()
-            }
-            .into(),
-        );
+        if props.auto_grow {
+            // Auto-grow: explicit height (row count) and full parent width
+            // instead of absolute positioning, so taffy's flex layout derives
+            // the height from wrapped content. This avoids `set_measure_func`
+            // and its `mark_dirty` side-effects entirely.
+            let row_count = props.buffer.row_count().max(1);
+            updater.set_layout_style_if_changed(
+                LayoutStyle {
+                    width: Size::Percent(100.0),
+                    height: Size::Length(row_count as u32),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        } else {
+            updater.set_layout_style_if_changed(
+                LayoutStyle {
+                    position: Position::Absolute,
+                    top: 0.into(),
+                    left: 0.into(),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
     }
 
     fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {
@@ -399,6 +424,9 @@ impl Component for TextBufferView {
 #[component]
 pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyElement<'static>> {
     let multiline = props.multiline;
+    // Auto-grow only applies to multiline inputs; single-line keeps its
+    // fixed one-row height and horizontal scrolling.
+    let auto_grow = props.auto_grow && multiline;
     let has_focus = props.has_focus;
     let wrap = if multiline {
         TextWrap::Wrap
@@ -483,7 +511,12 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
         } else if cursor_row < scroll_offset_row.get() {
             scroll_offset_row.set(cursor_row as _);
         }
-        if cursor_col >= scroll_offset_col.get() + width {
+        if auto_grow {
+            // Content wraps into extra rows instead of scrolling sideways.
+            if scroll_offset_col.get() != 0 {
+                scroll_offset_col.set(0);
+            }
+        } else if cursor_col >= scroll_offset_col.get() + width {
             scroll_offset_col.set(cursor_col - width + 1);
         } else if cursor_col < scroll_offset_col.get() {
             scroll_offset_col.set(cursor_col as _);
@@ -684,8 +717,8 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
     });
 
     element! {
-        View(overflow: Overflow::Hidden, width: 100pct, height: if multiline { Size::Percent(100.0) } else { Size::Length(1) }, position: Position::Relative) {
-            View(position: Position::Absolute, top: -(scroll_offset_row.get() as i32), left: -(scroll_offset_col.get() as i32)) {
+        View(overflow: Overflow::Hidden, width: 100pct, height: if auto_grow { Size::Auto } else if multiline { Size::Percent(100.0) } else { Size::Length(1) }, position: Position::Relative) {
+            View(position: if auto_grow { Position::Relative } else { Position::Absolute }, top: if auto_grow { 0 } else { -(scroll_offset_row.get() as i32) }, left: if auto_grow { 0 } else { -(scroll_offset_col.get() as i32) }) {
                 TextBufferView(
                     buffer,
                     color: props.color,
@@ -693,6 +726,7 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
                     underline: props.decoration == TextDecoration::Underline,
                     italic: props.italic,
                     invert: props.invert,
+                    auto_grow,
                 )
             }
         }
@@ -1016,6 +1050,43 @@ mod tests {
             .await;
         let expected = vec!["  \n\n\n", " foo\n ! \n\n"];
         assert_eq!(actual, expected);
+    }
+
+    /// `auto_grow` derives the input's height from its wrapped row count
+    /// instead of filling the container, so the rendered row count follows the
+    /// content. Matches upstream #225.
+    #[test]
+    fn test_text_input_auto_grow_height_follows_wrapped_rows() {
+        #[derive(Default, Props)]
+        struct AutoGrowProps {
+            value: String,
+        }
+
+        #[component]
+        fn AutoGrowInput(props: &AutoGrowProps) -> impl Into<AnyElement<'static>> {
+            element! {
+                View(width: 6, height: 4) {
+                    TextInput(
+                        has_focus: false,
+                        multiline: true,
+                        auto_grow: true,
+                        value: props.value.clone(),
+                        on_change: |_| {},
+                    )
+                }
+            }
+        }
+
+        let one_row = element!(AutoGrowInput(value: "a".to_string()))
+            .render(None)
+            .to_string();
+        let three_rows = element!(AutoGrowInput(value: "abc".to_string()))
+            .render(None)
+            .to_string();
+
+        // Height tracks the wrapped row count rather than staying fixed.
+        assert_eq!(one_row.lines().filter(|l| !l.is_empty()).count(), 1);
+        assert_eq!(three_rows.lines().filter(|l| !l.is_empty()).count(), 3);
     }
 
     #[apply(test!)]

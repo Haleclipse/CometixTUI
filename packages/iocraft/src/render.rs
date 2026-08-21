@@ -1609,7 +1609,10 @@ impl<'a> Tree<'a> {
                 continue;
             }
             term.resolve_pending_ctrl_c();
-            if term.received_ctrl_c() {
+            // Symmetric with the pre-select check: `system.exit()` during the
+            // preceding render must not be missed when the component's wait
+            // resolves before the terminal's.
+            if self.system_context.should_exit() || term.received_ctrl_c() {
                 break;
             }
             // Frame throttling: after the first change, keep absorbing further changes
@@ -1656,14 +1659,14 @@ impl<'a> Tree<'a> {
                     if resumed_during_throttle {
                         break;
                     }
-                    if timed_out || term.received_ctrl_c() {
+                    if timed_out || self.system_context.should_exit() || term.received_ctrl_c() {
                         break;
                     }
                 }
                 if resumed_during_throttle {
                     continue;
                 }
-                if term.received_ctrl_c() {
+                if self.system_context.should_exit() || term.received_ctrl_c() {
                     break;
                 }
             }
