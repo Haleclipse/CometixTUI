@@ -216,24 +216,34 @@ impl<'a> SegmentedString<'a> {
 
                     if current_line.width + visible_width > width {
                         // This segment is too wide, we need to forcefully break it
-                        let mut w = 0;
+                        // Continue from earlier segments already placed on this
+                        // visual line. Starting at zero overfilled the line and
+                        // let the canvas clip the first character after every
+                        // segment boundary.
+                        let mut w = current_line.width;
                         let mut start_idx = 0;
                         for (idx, grapheme) in segment.text.grapheme_indices(true) {
                             if idx >= trailing_whitespace_idx {
                                 break;
                             }
-                            let grapheme_width =
+                            let mut grapheme_width =
                                 crate::canvas::string_display_width_from_col(grapheme, w);
                             if w > 0 && w + grapheme_width > width {
                                 // We have a full line. Break on grapheme boundaries
                                 // and measure with the same terminal-width helper as
                                 // the renderer, matching CC Ink's wrapAnsi/stringWidth
                                 // path for VS16 emoji, keycaps, and ZWJ clusters.
-                                current_line.push_segment(segment.substring(start_idx, idx));
+                                if start_idx < idx {
+                                    current_line.push_segment(segment.substring(start_idx, idx));
+                                }
                                 lines.push(current_line);
                                 current_line = SegmentedStringLine::default();
                                 w = 0;
                                 start_idx = idx;
+                                // Tabs and other column-dependent graphemes must
+                                // be remeasured at the new line's column zero.
+                                grapheme_width =
+                                    crate::canvas::string_display_width_from_col(grapheme, w);
                             }
                             w += grapheme_width;
                         }
@@ -424,6 +434,20 @@ mod tests {
                 .map(|line| line.to_string())
                 .collect::<Vec<_>>();
             assert_eq!(lines, vec!["this is a ", "wrapping test"]);
+        }
+
+        {
+            // CC structured text wraps the flattened plain string once. A
+            // long later segment must consume the first segment's remaining
+            // width rather than starting its own width counter at zero.
+            let segmented_string: SegmentedString =
+                ["(", "notes.ipynb", "@cell)"].into_iter().collect();
+            let lines = segmented_string
+                .wrap(7)
+                .into_iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(lines, vec!["(notes.", "ipynb@c", "ell)"]);
         }
 
         {

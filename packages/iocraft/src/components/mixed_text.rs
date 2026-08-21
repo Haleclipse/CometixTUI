@@ -175,6 +175,30 @@ struct RenderedMixedTextLine {
 }
 
 impl MixedText {
+    /// L1 (`Explicit structured Ink text-flow carrier`): prepares one resolved
+    /// segment flow for both `MixedText` and structured `Text` without copying
+    /// this component's wrapping, truncation, bidi, or drawing engine.
+    pub(crate) fn update_contents(
+        &mut self,
+        contents: &mut [MixedTextContent],
+        wrap: TextWrap,
+        align: TextAlign,
+        updater: &mut ComponentUpdater,
+    ) {
+        for content in contents.iter_mut() {
+            content.text = strip_ansi(&content.text).into_owned();
+        }
+        let plaintext = contents
+            .iter()
+            .map(|content| content.text.as_str())
+            .collect::<Vec<_>>()
+            .join("");
+        self.contents = contents.to_vec();
+        self.wrap = wrap;
+        self.align = align;
+        updater.set_measure_func(Text::measure_func(plaintext, wrap));
+    }
+
     fn line_is_soft_continuation(
         contents: &[MixedTextContent],
         line: &crate::segmented_string::SegmentedStringLine<'_>,
@@ -425,19 +449,7 @@ impl Component for MixedText {
         _hooks: Hooks,
         updater: &mut ComponentUpdater,
     ) {
-        for content in props.contents.iter_mut() {
-            content.text = strip_ansi(&content.text).into_owned();
-        }
-        let plaintext = props
-            .contents
-            .iter()
-            .map(|content| content.text.as_str())
-            .collect::<Vec<_>>()
-            .join("");
-        self.contents = props.contents.clone();
-        self.wrap = props.wrap;
-        self.align = props.align;
-        updater.set_measure_func(Text::measure_func(plaintext, props.wrap));
+        self.update_contents(&mut props.contents, props.wrap, props.align, updater);
     }
 
     fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {

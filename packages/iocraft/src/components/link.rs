@@ -1,4 +1,8 @@
-use crate::{component, components::Text, element, AnyElement, Props};
+use crate::{
+    component,
+    components::{StyledSegment, Text},
+    element, AnyElement, Props,
+};
 
 /// Props for [`Link`].
 #[non_exhaustive]
@@ -20,27 +24,74 @@ pub struct LinkProps {
     pub enabled: Option<bool>,
 }
 
+/// L1 (`Explicit structured Ink text-flow carrier`) for CC
+/// `ink/components/Link.tsx#Link:12-31`.
+///
+/// Resolves Link's source-owned support/fallback branch into one structured
+/// segment so nested text flows and the standalone component share it.
+///
+/// This is hidden from the documented API; external visibility exists only
+/// for the coordinated Cometix integration across the crate boundary.
+#[doc(hidden)]
+pub fn link_segment(
+    url: String,
+    label: Option<String>,
+    fallback: Option<String>,
+    enabled: Option<bool>,
+) -> StyledSegment {
+    let label = label.unwrap_or_else(|| url.clone());
+    if enabled.unwrap_or_else(crate::ansi::supports_hyperlinks) && !url.is_empty() {
+        StyledSegment {
+            text: label,
+            hyperlink: Some(url),
+            ..StyledSegment::default()
+        }
+    } else {
+        StyledSegment::new(fallback.unwrap_or(label))
+    }
+}
+
 /// Renders text with OSC 8 hyperlink metadata.
 ///
 /// This is the iocraft counterpart to CC Ink's `<Link>` helper. It wraps
-/// [`Text`] with `href` when enabled so fullscreen click handling and terminal
-/// hyperlink support share the same screen-buffer metadata.
+/// [`Text`] with a structured link segment when enabled so fullscreen click
+/// handling and terminal hyperlink support share the same screen-buffer metadata.
 #[component]
 pub fn Link(props: &LinkProps) -> impl Into<AnyElement<'static>> {
-    let label = props.label.clone().unwrap_or_else(|| props.url.clone());
-    let enabled = props
-        .enabled
-        .unwrap_or_else(crate::ansi::supports_hyperlinks);
-    if enabled && !props.url.is_empty() {
-        element!(Text(content: label, href: props.url.clone()))
-    } else {
-        element!(Text(content: props.fallback.clone().unwrap_or(label)))
-    }
+    let segment = link_segment(
+        props.url.clone(),
+        props.label.clone(),
+        props.fallback.clone(),
+        props.enabled,
+    );
+    element!(Text(segments: Some(vec![segment])))
 }
 
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;
+
+    /// Maps to CC `ink/components/Link.tsx:20-30`.
+    #[test]
+    fn link_segment_support_and_fallback_match_official() {
+        let enabled = link_segment(
+            "https://example.com".to_string(),
+            Some("docs".to_string()),
+            Some("plain docs".to_string()),
+            Some(true),
+        );
+        assert_eq!(enabled.text, "docs");
+        assert_eq!(enabled.hyperlink.as_deref(), Some("https://example.com"));
+
+        let disabled = link_segment(
+            "https://example.com".to_string(),
+            Some("docs".to_string()),
+            Some("plain docs".to_string()),
+            Some(false),
+        );
+        assert_eq!(disabled.text, "plain docs");
+        assert_eq!(disabled.hyperlink, None);
+    }
 
     #[test]
     fn test_link_renders_osc8_hyperlink_metadata() {

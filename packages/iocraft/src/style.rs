@@ -209,6 +209,38 @@ impl From<FlexBasis> for Dimension {
     }
 }
 
+/// Maps to CC `ink/styles.ts#TextStyles:44-53`.
+///
+/// Optional fields preserve Ink's per-field inheritance and object-spread
+/// override semantics while structured text descendants are flattened.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TextStyles {
+    /// Optional foreground color override.
+    pub color: Option<Color>,
+
+    /// Optional background color override.
+    pub background_color: Option<Color>,
+
+    /// Optional dim-intensity override.
+    pub dim: Option<bool>,
+
+    /// Optional bold-intensity override.
+    pub bold: Option<bool>,
+
+    /// Optional italic override.
+    pub italic: Option<bool>,
+
+    /// Optional underline override.
+    pub underline: Option<bool>,
+
+    /// Optional strikethrough override.
+    pub strikethrough: Option<bool>,
+
+    /// Optional foreground/background inversion override.
+    pub inverse: Option<bool>,
+}
+
 /// A weight which can be applied to text.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Weight {

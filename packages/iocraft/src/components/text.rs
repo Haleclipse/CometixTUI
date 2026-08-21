@@ -1,7 +1,11 @@
 use crate::{
-    canvas::UnderlineStyle, render::MeasureFunc, segmented_string::SegmentedString,
-    strip_ansi::strip_ansi, CanvasTextStyle, Color, Component, ComponentDrawer, ComponentUpdater,
-    Hooks, Props, Weight,
+    canvas::UnderlineStyle,
+    components::{MixedText, MixedTextContent},
+    render::MeasureFunc,
+    segmented_string::SegmentedString,
+    strip_ansi::strip_ansi,
+    CanvasTextStyle, Color, Component, ComponentDrawer, ComponentUpdater, Hooks, Props, TextStyles,
+    Weight,
 };
 use taffy::{AvailableSpace, Size};
 
@@ -53,6 +57,34 @@ pub enum TextDecoration {
     Underline,
 }
 
+/// Maps to CC `ink/squash-text-nodes.ts#StyledSegment:8-12`.
+///
+/// L1 (`Explicit structured Ink text-flow carrier`): iocraft has no React
+/// host DOM to traverse, so translated callers provide ordered child-local
+/// segment fields and [`Text`] performs the outer-root merge before drawing.
+#[non_exhaustive]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StyledSegment {
+    /// Plain text contributed by this segment.
+    pub text: String,
+
+    /// Optional child-local style fields.
+    pub styles: TextStyles,
+
+    /// Optional OSC 8 hyperlink target.
+    pub hyperlink: Option<String>,
+}
+
+impl StyledSegment {
+    /// Creates an unstyled segment with the given text.
+    pub fn new(text: impl ToString) -> Self {
+        Self {
+            text: text.to_string(),
+            ..Self::default()
+        }
+    }
+}
+
 /// The props which can be passed to the [`Text`] component.
 #[non_exhaustive]
 #[derive(Default, Props)]
@@ -65,6 +97,11 @@ pub struct TextProps {
 
     /// The content of the text.
     pub content: String,
+
+    /// Explicit structured descendants replacing CC's runtime host-tree
+    /// traversal. `None` keeps the legacy string fast path; `Some` is
+    /// authoritative even when empty or when [`Self::content`] is non-empty.
+    pub segments: Option<Vec<StyledSegment>>,
 
     /// The weight of the text.
     pub weight: Weight,
@@ -149,6 +186,8 @@ pub struct Text {
     wrap: TextWrap,
     align: TextAlign,
     hyperlink: Option<String>,
+    structured: bool,
+    mixed_text: MixedText,
 }
 
 impl Text {
@@ -555,13 +594,64 @@ impl Component for Text {
         };
         self.background_color = props.background_color;
         self.hyperlink = props.href.clone();
-        self.content = strip_ansi(&props.content).into_owned();
         self.wrap = props.wrap;
         self.align = props.align;
+
+        if let Some(segments) = props.segments.as_ref() {
+            let root_bold = self.style.weight == Weight::Bold;
+            let root_dim = self.style.dim || self.style.weight == Weight::Light;
+            let mut contents = Vec::with_capacity(segments.len());
+            for segment in segments.iter().filter(|segment| !segment.text.is_empty()) {
+                let bold = segment.styles.bold.unwrap_or(root_bold);
+                let dim = segment.styles.dim.unwrap_or(root_dim);
+                contents.push(MixedTextContent {
+                    text: segment.text.clone(),
+                    color: segment.styles.color.or(self.style.color),
+                    background_color: segment.styles.background_color.or(self.background_color),
+                    weight: if bold {
+                        Weight::Bold
+                    } else if dim {
+                        Weight::Light
+                    } else {
+                        Weight::Normal
+                    },
+                    dim,
+                    decoration: if segment.styles.underline.unwrap_or(self.style.underline) {
+                        TextDecoration::Underline
+                    } else {
+                        TextDecoration::None
+                    },
+                    italic: segment.styles.italic.unwrap_or(self.style.italic),
+                    strikethrough: segment
+                        .styles
+                        .strikethrough
+                        .unwrap_or(self.style.strikethrough),
+                    overline: self.style.overline,
+                    invert: segment.styles.inverse.unwrap_or(self.style.invert),
+                    href: segment
+                        .hyperlink
+                        .as_ref()
+                        .filter(|href| !href.is_empty())
+                        .cloned()
+                        .or_else(|| self.hyperlink.clone()),
+                });
+            }
+            self.structured = true;
+            self.mixed_text
+                .update_contents(&mut contents, props.wrap, props.align, updater);
+            return;
+        }
+
+        self.structured = false;
+        self.content = strip_ansi(&props.content).into_owned();
         updater.set_measure_func(Self::measure_func(self.content.clone(), props.wrap));
     }
 
     fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {
+        if self.structured {
+            <MixedText as Component>::draw(&mut self.mixed_text, drawer);
+            return;
+        }
         if drawer.zero_height_sibling_shares_y() {
             return;
         }
@@ -630,6 +720,180 @@ mod tests {
         assert_eq!(wrap_text("abcdef", 3, TextWrap::NoWrap), "abcdef");
         assert_eq!(wrap_text("abcdef", 3, TextWrap::End), "abcdef");
         assert_eq!(wrap_text("abcdef", 3, TextWrap::Middle), "abcdef");
+    }
+
+    /// Maps to CC `ink/squash-text-nodes.ts:18-63` and
+    /// `ink/render-node-to-output.ts:550-626`.
+    #[test]
+    fn structured_segments_wrap_and_keep_link_boundaries_like_official() {
+        let canvas = element! {
+            View(width: 7) {
+                Text(segments: Some(vec![
+                    StyledSegment::new("("),
+                    StyledSegment {
+                        text: "notes.ipynb".to_string(),
+                        hyperlink: Some("file:///notes.ipynb".to_string()),
+                        ..StyledSegment::default()
+                    },
+                    StyledSegment::new("@cell)"),
+                ]))
+            }
+        }
+        .render(None);
+
+        let mut visible = String::new();
+        let mut linked = String::new();
+        for row in 0..canvas.height() {
+            for col in 0..canvas.width() {
+                let Some(cell) = canvas.cell(col, row) else {
+                    continue;
+                };
+                if let Some(text) = cell.text() {
+                    visible.push_str(text);
+                    if cell.hyperlink() == Some("file:///notes.ipynb") {
+                        linked.push_str(text);
+                    }
+                }
+            }
+        }
+
+        assert_eq!(visible, "(notes.ipynb@cell)", "canvas=\n{canvas}");
+        assert_eq!(linked, "notes.ipynb");
+        assert!(canvas.height() > 1, "canvas=\n{canvas}");
+        assert!(
+            (1..canvas.height()).any(|row| canvas.soft_wrap_continuation(row) > 0),
+            "structured wrapping must retain soft-wrap selection metadata"
+        );
+    }
+
+    /// Maps to CC `ink/squash-text-nodes.ts:23-26` field-wise style spread.
+    #[test]
+    fn structured_segment_styles_inherit_and_override_like_official() {
+        let canvas = element! {
+            Text(
+                dim: true,
+                segments: Some(vec![
+                    StyledSegment::new("outer "),
+                    StyledSegment {
+                        text: "inner".to_string(),
+                        styles: TextStyles {
+                            color: Some(Color::Green),
+                            background_color: Some(Color::Blue),
+                            bold: Some(true),
+                            italic: Some(true),
+                            underline: Some(true),
+                            strikethrough: Some(true),
+                            inverse: Some(true),
+                            ..TextStyles::default()
+                        },
+                        hyperlink: None,
+                    },
+                ]),
+            )
+        }
+        .render(None);
+
+        let outer = canvas.resolved_text_style(0, 0).expect("outer style");
+        assert!(outer.is_dim());
+        assert!(!outer.is_bold());
+
+        let inner = canvas.resolved_text_style(6, 0).expect("inner style");
+        assert_eq!(inner.color, Some(Color::Green));
+        assert_eq!(inner.weight, Weight::Bold);
+        assert!(inner.dim);
+        assert!(inner.italic);
+        assert!(inner.underline);
+        assert!(inner.strikethrough);
+        assert!(inner.invert);
+        assert_eq!(
+            canvas.cell(6, 0).unwrap().background_color,
+            Some(Color::Blue)
+        );
+    }
+
+    /// Maps to raw host-level `textStyles` object spread in
+    /// CC `ink/squash-text-nodes.ts:23-26`.
+    #[test]
+    fn structured_segment_explicit_false_clears_inherited_style_like_official() {
+        let canvas = element! {
+            Text(
+                bold: true,
+                dim: true,
+                italic: true,
+                segments: Some(vec![StyledSegment {
+                    text: "plain".to_string(),
+                    styles: TextStyles {
+                        bold: Some(false),
+                        dim: Some(false),
+                        italic: Some(false),
+                        ..TextStyles::default()
+                    },
+                    hyperlink: None,
+                }]),
+            )
+        }
+        .render(None);
+
+        let style = canvas.resolved_text_style(0, 0).expect("plain style");
+        assert_eq!(style.weight, Weight::Normal);
+        assert!(!style.dim);
+        assert!(!style.italic);
+    }
+
+    /// Maps to CC `ink/squash-text-nodes.ts:51-59` `href || inheritedHyperlink`.
+    #[test]
+    fn structured_segment_hyperlinks_inherit_and_replace_like_official() {
+        let canvas = element! {
+            Text(
+                href: "https://parent.example".to_string(),
+                segments: Some(vec![
+                    StyledSegment::new("a"),
+                    StyledSegment {
+                        text: "b".to_string(),
+                        hyperlink: Some(String::new()),
+                        ..StyledSegment::default()
+                    },
+                    StyledSegment {
+                        text: "c".to_string(),
+                        hyperlink: Some("https://child.example".to_string()),
+                        ..StyledSegment::default()
+                    },
+                ]),
+            )
+        }
+        .render(None);
+
+        assert_eq!(
+            canvas.hyperlink_at(0, 0).as_deref(),
+            Some("https://parent.example")
+        );
+        assert_eq!(
+            canvas.hyperlink_at(1, 0).as_deref(),
+            Some("https://parent.example")
+        );
+        assert_eq!(
+            canvas.hyperlink_at(2, 0).as_deref(),
+            Some("https://child.example")
+        );
+    }
+
+    /// Maps to CC `Text`'s absent children and `squashTextNodesToSegments`'s
+    /// empty-text omission while preserving iocraft's legacy string carrier.
+    #[test]
+    fn structured_segment_presence_and_legacy_content_match_official() {
+        assert_eq!(
+            element!(Text(
+                content: "ignored".to_string(),
+                segments: Some(Vec::new())
+            ))
+            .to_string(),
+            ""
+        );
+        assert_eq!(
+            element!(Text(segments: Some(vec![StyledSegment::new("")]))).to_string(),
+            ""
+        );
+        assert_eq!(element!(Text(content: "legacy")).to_string(), "legacy\n");
     }
 
     #[test]
