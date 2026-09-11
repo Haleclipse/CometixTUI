@@ -23,7 +23,7 @@
 mod level;
 mod styles;
 
-pub use level::{stderr_level, stdout_level, ColorLevel};
+pub use level::{set_stderr_level, set_stdout_level, stderr_level, stdout_level, ColorLevel};
 pub use styles::{ansi256_to_ansi, hex_to_rgb, rgb_to_ansi, rgb_to_ansi256, NamedColor};
 
 use styles::{
@@ -46,6 +46,12 @@ struct Layer {
 /// layer appended, and [`Chalk::apply`] is `applyStyle`: it re-opens nested
 /// closes, encases linebreaks, and wraps the string in the accumulated
 /// open/close sequences. At level `0` every `apply` is a passthrough.
+///
+/// `Chalk` snapshots the singleton level at construction. The JS default
+/// export is one mutable object — writing `chalk.level` retargets every later
+/// call through that same instance. Match that behavior by constructing at
+/// use time (`Chalk::new()` per render pass); a long-lived `Chalk` value
+/// deliberately keeps the level it captured.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Chalk {
     level: ColorLevel,

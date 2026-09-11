@@ -1,13 +1,9 @@
 [package]
-name = "cometix-chalk"
+name = "chalk"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Rust port of chalk: terminal string styling with color-level detection and automatic downgrade."
 repository = "https://github.com/Haleclipse/CometixTUI"
-
-[lib]
-name = "chalk"
-path = "src/lib.rs"
 
 [dev-dependencies]

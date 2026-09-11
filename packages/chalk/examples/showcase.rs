@@ -2,7 +2,7 @@
 //! style group so the full surface is visible at a glance.
 //!
 //! ```sh
-//! cargo run -p cometix-chalk --example showcase
+//! cargo run -p chalk --example showcase
 //! ```
 
 use chalk::{Chalk, NamedColor};

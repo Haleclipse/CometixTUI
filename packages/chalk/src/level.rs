@@ -3,9 +3,20 @@
 //! Maps to: chalk/source/vendor/supports-color/index.js, plus the two
 //! Claude Code Ink adjustments from `ink/colorize.ts`
 //! (`boostChalkLevelForXtermJs`, `clampChalkLevelForTmux`).
+//!
+//! ## Divergence from the chalk bundled in current CC
+//!
+//! This port tracks chalk v6 (commit 661317e); CC currently bundles v5. The
+//! one observable detection difference is non-numeric FORCE_COLOR (e.g.
+//! `FORCE_COLOR=1x`): v5 runs `Number.parseInt` and forces level 1, while v6
+//! treats it as unset so detection continues (with `TERM=dumb` that then
+//! yields 0). v6 semantics win here.
 
 use std::io::IsTerminal;
-use std::sync::OnceLock;
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    OnceLock,
+};
 
 /// Terminal color support level, mirroring chalk/supports-color:
 ///
@@ -88,7 +99,8 @@ pub(crate) fn detect_with_env(
 
     // Maps to ink/colorize.ts: boost first so the tmux clamp can re-clamp when
     // tmux runs inside a VS Code terminal. The boost requires exactly level 2
-    // so NO_COLOR / FORCE_COLOR=0 (level 0) stay respected.
+    // so an explicit "no colors" request (FORCE_COLOR=0 → level 0) stays
+    // respected. (NO_COLOR itself is ignored by chalk v6's supports-color.)
     let boosted = if base == 2 && env("TERM_PROGRAM").as_deref() == Some("vscode") {
         3
     } else {
@@ -240,29 +252,49 @@ fn teamcity_supports_color(version: &str) -> bool {
     major.len() >= 2 && major.chars().all(|c| c.is_ascii_digit())
 }
 
-/// Process-wide stdout color level, computed once. Mirrors chalk's singleton
-/// `chalk.level` after CC Ink's colorize.ts adjustments.
-pub fn stdout_level() -> ColorLevel {
-    static LEVEL: OnceLock<ColorLevel> = OnceLock::new();
-    *LEVEL.get_or_init(|| {
-        detect_with_env(
+fn stdout_cell() -> &'static AtomicU8 {
+    static LEVEL: OnceLock<AtomicU8> = OnceLock::new();
+    LEVEL.get_or_init(|| {
+        AtomicU8::new(detect_with_env(
             |key| std::env::var(key).ok(),
             &std::env::args().collect::<Vec<_>>(),
             std::io::stdout().is_terminal(),
-        )
+        ))
     })
 }
 
-/// Process-wide stderr color level, computed once. Mirrors `chalkStderr`.
-pub fn stderr_level() -> ColorLevel {
-    static LEVEL: OnceLock<ColorLevel> = OnceLock::new();
-    *LEVEL.get_or_init(|| {
-        detect_with_env(
+fn stderr_cell() -> &'static AtomicU8 {
+    static LEVEL: OnceLock<AtomicU8> = OnceLock::new();
+    LEVEL.get_or_init(|| {
+        AtomicU8::new(detect_with_env(
             |key| std::env::var(key).ok(),
             &std::env::args().collect::<Vec<_>>(),
             std::io::stderr().is_terminal(),
-        )
+        ))
     })
+}
+
+/// Process-wide stdout color level, detected on first read. Mirrors chalk's
+/// singleton `chalk.level` after CC Ink's colorize.ts adjustments.
+pub fn stdout_level() -> ColorLevel {
+    stdout_cell().load(Ordering::Relaxed)
+}
+
+/// Overrides the stdout singleton level. Mirrors the writable `chalk.level`
+/// property — the same primitive CC Ink's colorize.ts boost/clamp writes to,
+/// and the way tests pin a deterministic level in a single process.
+pub fn set_stdout_level(level: ColorLevel) {
+    stdout_cell().store(level.min(3), Ordering::Relaxed);
+}
+
+/// Process-wide stderr color level, detected on first read. Mirrors `chalkStderr`.
+pub fn stderr_level() -> ColorLevel {
+    stderr_cell().load(Ordering::Relaxed)
+}
+
+/// Overrides the stderr singleton level. Mirrors the writable `chalkStderr.level`.
+pub fn set_stderr_level(level: ColorLevel) {
+    stderr_cell().store(level.min(3), Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -281,6 +313,25 @@ mod tests {
             &args,
             tty,
         )
+    }
+
+    #[test]
+    fn no_color_is_ignored_matching_chalk_v6_supports_color() {
+        // chalk v6's vendored supports-color has no NO_COLOR handling at all:
+        // detection proceeds as if the variable were absent. (CC's own output
+        // behaves the same way — NO_COLOR leaves its Ink UI fully styled.)
+        assert_eq!(
+            level(&[("NO_COLOR", "1"), ("TERM", "xterm-256color")], &[], true),
+            2
+        );
+        assert_eq!(
+            level(&[("NO_COLOR", "1"), ("COLORTERM", "truecolor")], &[], true),
+            3
+        );
+        assert_eq!(
+            level(&[("NO_COLOR", "1"), ("FORCE_COLOR", "3")], &[], false),
+            3
+        );
     }
 
     #[test]
@@ -406,7 +457,7 @@ mod tests {
             ),
             3
         );
-        // NO_COLOR-style level 0 must NOT be boosted.
+        // An explicit FORCE_COLOR=0 (level 0) must NOT be boosted.
         assert_eq!(
             level(
                 &[("FORCE_COLOR", "0"), ("TERM_PROGRAM", "vscode")],

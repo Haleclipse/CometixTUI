@@ -174,21 +174,30 @@ pub fn ansi256_to_ansi(code: u8) -> u8 {
     result
 }
 
-/// Maps to ansi-styles `hexToRgb`: accepts `#rrggbb` / `rrggbb` / `#rgb`,
-/// returning black for anything unparsable.
+/// Maps to ansi-styles `hexToRgb`: the JS regex `/[a-f\d]{6}|[a-f\d]{3}/i`
+/// finds the first contiguous run of 6 (preferred at each position) or 3 hex
+/// digits; input without such a run yields black.
 pub fn hex_to_rgb(hex: &str) -> (u8, u8, u8) {
-    let candidate: String = hex.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-    let expanded = match candidate.len() {
-        3 => candidate.chars().flat_map(|c| [c, c]).collect::<String>(),
-        6 => candidate,
-        // The JS regex also matches a 6- or 3-digit run inside longer input;
-        // approximate by taking the first 6 hex digits when longer.
-        len if len > 6 => candidate[..6].to_string(),
-        _ => return (0, 0, 0),
-    };
-    let Ok(value) = u32::from_str_radix(&expanded, 16) else {
+    let bytes = hex.as_bytes();
+    let all_hex = |range: &[u8]| range.iter().all(u8::is_ascii_hexdigit);
+    let candidate = (0..bytes.len()).find_map(|i| {
+        if bytes.len() - i >= 6 && all_hex(&bytes[i..i + 6]) {
+            Some(&hex[i..i + 6])
+        } else if bytes.len() - i >= 3 && all_hex(&bytes[i..i + 3]) {
+            Some(&hex[i..i + 3])
+        } else {
+            None
+        }
+    });
+    let Some(candidate) = candidate else {
         return (0, 0, 0);
     };
+    let expanded = if candidate.len() == 3 {
+        candidate.chars().flat_map(|c| [c, c]).collect::<String>()
+    } else {
+        candidate.to_string()
+    };
+    let value = u32::from_str_radix(&expanded, 16).expect("scanned hex digits");
     (
         ((value >> 16) & 0xff) as u8,
         ((value >> 8) & 0xff) as u8,
@@ -242,5 +251,12 @@ mod tests {
         assert_eq!(hex_to_rgb("00ff00"), (0, 255, 0));
         assert_eq!(hex_to_rgb("#f0a"), (255, 0, 170));
         assert_eq!(hex_to_rgb("nope"), (0, 0, 0));
+        // The JS regex matches the first CONTIGUOUS 6- or 3-digit run; node
+        // chalk v6 oracle for each of these:
+        assert_eq!(hex_to_rgb("0xFF00FF"), (255, 0, 255));
+        assert_eq!(hex_to_rgb("#abcdef12"), (171, 205, 239));
+        assert_eq!(hex_to_rgb("zzab12cd34"), (171, 18, 205));
+        assert_eq!(hex_to_rgb("12x345"), (51, 68, 85));
+        assert_eq!(hex_to_rgb("ab"), (0, 0, 0));
     }
 }
