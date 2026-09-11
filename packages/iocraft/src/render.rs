@@ -1290,11 +1290,21 @@ impl<'a> Tree<'a> {
                         })
                         .unwrap_or(AvailableSpace::MaxContent),
                 },
-                |known_dimensions, available_space, _node_id, node_context, style| {
-                    match node_context.and_then(|cx| cx.measure_func.as_ref()) {
-                        Some(f) => f(known_dimensions, available_space, style),
-                        None => Size::ZERO,
-                    }
+                // taffy 0.14 (#1091): the measure closure receives LayoutInput
+                // and returns LayoutOutput; compute_leaf_layout preserves the
+                // old leaf-measurement behavior around our Size-based funcs.
+                |inputs, _node_id, node_context, style| {
+                    taffy::compute_leaf_layout(
+                        inputs,
+                        style,
+                        |_, _| 0.0,
+                        |known_dimensions, available_space| match node_context
+                            .and_then(|cx| cx.measure_func.as_ref())
+                        {
+                            Some(f) => f(known_dimensions, available_space, style),
+                            None => Size::ZERO,
+                        },
+                    )
                 },
             )
             .expect("we should be able to compute the layout");

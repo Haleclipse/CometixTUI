@@ -13,9 +13,9 @@ unstable-output-streams = []
 [dependencies]
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 futures = "0.3.30"
-# 0.12.1 includes the layout-cache soundness fix (upstream #911) that cures
-# the CometixCode /resume "blank ocean" (see Haleclipse/taffy#1).
-taffy = { version = "0.12.1", default-features = false, features = ["std", "flexbox", "grid", "parse", "taffy_tree"] }
+# 0.14 carries the layout-cache soundness line (#911 in 0.12, axis/eviction fixes
+# in #1010) that cures the CometixCode /resume "blank ocean" (Haleclipse/taffy#1).
+taffy = { version = "0.14.0", default-features = false, features = ["std", "flexbox", "grid", "parse", "taffy_tree"] }
 iocraft-macros = { version = "0.2.4", path = "../iocraft-macros" }
 bitflags = "2.6.0"
 unicode-width = "0.1.13"

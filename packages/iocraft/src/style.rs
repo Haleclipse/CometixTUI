@@ -462,7 +462,7 @@ impl From<String> for GridPlacementSpec {
 ///
 /// Conversion panics if rows have differing column counts or an area is not rectangular.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GridAreas(pub(crate) Vec<taffy::GridTemplateArea<String>>);
+pub struct GridAreas(pub(crate) Option<taffy::GridTemplateAreas<String>>);
 
 impl From<&str> for GridAreas {
     fn from(s: &str) -> Self {
@@ -528,7 +528,11 @@ impl From<&str> for GridAreas {
             }
         }
 
-        Self(areas)
+        Self(Some(taffy::GridTemplateAreas {
+            areas: areas.into_iter().collect(),
+            row_count: rows.len() as u16,
+            column_count: columns as u16,
+        }))
     }
 }
 
@@ -785,8 +789,10 @@ mod tests {
             "footer footer"
         "#,
         );
-        assert_eq!(areas.0.len(), 4);
-        let header = areas.0.iter().find(|a| a.name == "header").unwrap();
+        let template = areas.0.as_ref().unwrap();
+        assert_eq!(template.areas.len(), 4);
+        assert_eq!((template.row_count, template.column_count), (3, 2));
+        let header = template.areas.iter().find(|a| a.name == "header").unwrap();
         assert_eq!(
             (
                 header.row_start,
@@ -796,7 +802,7 @@ mod tests {
             ),
             (1, 2, 1, 3)
         );
-        let main = areas.0.iter().find(|a| a.name == "main").unwrap();
+        let main = template.areas.iter().find(|a| a.name == "main").unwrap();
         assert_eq!(
             (
                 main.row_start,
@@ -811,7 +817,7 @@ mod tests {
     #[test]
     fn test_grid_areas_dot_skips_cells() {
         let areas = GridAreas::from(r#""a ." ". b""#);
-        assert_eq!(areas.0.len(), 2);
+        assert_eq!(areas.0.as_ref().unwrap().areas.len(), 2);
     }
 
     #[test]
