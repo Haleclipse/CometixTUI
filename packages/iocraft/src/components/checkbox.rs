@@ -1,16 +1,21 @@
 use crate::{
     component,
-    components::Text,
+    components::{Text, View},
     element,
     hooks::{UseState, UseTerminalEvents},
-    AnyElement, Color, HandlerMut, Hooks, KeyCode, KeyEvent, KeyEventKind, MouseEventKind, Props,
-    TerminalEvent,
+    AnyElement, Color, FlexDirection, HandlerMut, Hooks, KeyCode, KeyEvent, KeyEventKind,
+    MouseEventKind, Props, TerminalEvent,
 };
 
 /// The props which can be passed to the [`Checkbox`] component.
 #[non_exhaustive]
 #[derive(Default, Props)]
-pub struct CheckboxProps {
+pub struct CheckboxProps<'a> {
+    /// Label elements rendered after the checkbox indicator, separated by one
+    /// space. Clicking the label toggles the checkbox too, matching upstream
+    /// iocraft's `Checkbox` children.
+    pub children: Vec<AnyElement<'a>>,
+
     /// Whether the checkbox is checked.
     ///
     /// This is a controlled prop: the checkbox renders whatever you pass and reports
@@ -65,7 +70,7 @@ pub struct CheckboxProps {
 /// # }
 /// ```
 #[component]
-pub fn Checkbox(mut hooks: Hooks, props: &mut CheckboxProps) -> impl Into<AnyElement<'static>> {
+pub fn Checkbox<'a>(mut hooks: Hooks, props: &mut CheckboxProps<'a>) -> impl Into<AnyElement<'a>> {
     let has_focus = props.has_focus;
     let checked = props.checked;
 
@@ -115,8 +120,15 @@ pub fn Checkbox(mut hooks: Hooks, props: &mut CheckboxProps) -> impl Into<AnyEle
             .unwrap_or_else(|| "[ ]".to_string())
     };
 
+    let children = std::mem::take(&mut props.children);
+    let separator = (!children.is_empty()).then(|| element!(Text(content: " ")));
+
     element! {
-        Text(content: symbol, color: props.color, invert: has_focus)
+        View(flex_direction: FlexDirection::Row) {
+            Text(content: symbol, color: props.color, invert: has_focus)
+            #(separator)
+            #(children)
+        }
     }
 }
 
@@ -255,5 +267,42 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
         assert_eq!(actual, vec!["[ ]\n"]);
+    }
+
+    #[component]
+    fn LabeledComponent(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut checked = hooks.use_state(|| false);
+
+        if checked.get() {
+            system.exit();
+        }
+
+        element! {
+            Checkbox(
+                checked: checked.get(),
+                has_focus: true,
+                on_change: move |value| checked.set(value),
+            ) {
+                Text(content: "Enable feature")
+            }
+        }
+    }
+
+    /// Children render as a space-separated label after the indicator,
+    /// matching upstream iocraft's Checkbox children support.
+    #[apply(test!)]
+    async fn test_checkbox_renders_children_label() {
+        let actual = element!(LabeledComponent)
+            .mock_terminal_render_loop(MockTerminalConfig::with_events(futures::stream::iter(
+                vec![TerminalEvent::Key(KeyEvent::new(
+                    KeyEventKind::Press,
+                    KeyCode::Char(' '),
+                ))],
+            )))
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(actual, vec!["[ ] Enable feature\n", "[x] Enable feature\n"]);
     }
 }
