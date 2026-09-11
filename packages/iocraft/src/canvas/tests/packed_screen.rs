@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 use super::super::*;
 use crate::prelude::*;
-use crossterm::{csi, style::Colored};
+use crossterm::csi;
 
 #[test]
 fn test_render_metadata_does_not_affect_canvas_equality() {
@@ -2041,5 +2041,51 @@ fn test_canvas_packed_screen_debug_repaint_overlay_marks_changed_and_damaged_cel
             width: 3,
             height: 1,
         })
+    );
+}
+
+/// The packed sparse row writer honors the same level-0 zero-SGR contract as
+/// the canvas row writer: cursor movement, OSC 8 hyperlinks, and erase-to-eol
+/// still flow, while style transitions and the trailing reset are suppressed.
+#[test]
+fn test_packed_row_writer_emits_no_sgr_at_level_zero() {
+    let _guard = crate::ansi::TestColorLevelGuard::pin(0);
+    let mut pools = CanvasPackedCellPools::new();
+    let mut style_cache = CanvasStyleTransitionCache::new();
+    let mut screen = CanvasPackedScreen::new(6, 1);
+    screen.set_cell_text(
+        &mut pools,
+        2,
+        0,
+        "A",
+        CanvasResolvedStyle {
+            text: CanvasTextStyle {
+                color: Some(Color::Green),
+                weight: Weight::Bold,
+                ..Default::default()
+            },
+            background_color: None,
+        },
+        Some("https://example.com"),
+        CanvasPackedCellWidth::Normal,
+    );
+
+    let row = screen
+        .ansi_row_with_style_cache(&pools, &mut style_cache, 0, 0)
+        .unwrap();
+    assert!(row.contains("A"));
+    assert!(
+        row.contains("\x1b]8;"),
+        "hyperlinks are not styling: {row:?}"
+    );
+    assert!(row.contains("\x1b[K"), "erase-to-eol is layout: {row:?}");
+    let stripped = row
+        .replace("\x1b[2C", "")
+        .replace("\x1b[K", "")
+        .replace("\x1b]8;id=ags5vy;https://example.com\x1b\\", "")
+        .replace("\x1b]8;;\x1b\\", "");
+    assert!(
+        !stripped.contains('\x1b'),
+        "no SGR may remain at level 0: {row:?}"
     );
 }

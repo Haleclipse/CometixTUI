@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 use super::super::*;
 use crate::prelude::*;
-use crossterm::{csi, style::Colored};
+use crossterm::csi;
 
 #[test]
 fn test_scan_text_positions_is_case_insensitive_and_wide_aware() {

@@ -141,7 +141,6 @@ pub fn CachedSubtree<'a>(
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;
-    use crossterm::style::Colored;
     use futures::{stream, StreamExt};
 
     #[component]
@@ -348,7 +347,7 @@ mod tests {
             }
         });
 
-        if fenced.get() && !selection.has_selection() {
+        if !selection.has_selection() {
             let mut controller = SelectionController::new();
             controller.selection_mut().start(0, 0);
             controller.selection_mut().update(3, 0);
@@ -370,6 +369,25 @@ mod tests {
         }
     }
 
+    // Inspect the composed post-render background rather than a particular
+    // ANSI spelling. pack_with copies overlays; it does not reapply noSelect.
+    fn assert_selection_frame(canvas: &Canvas, no_select: bool, background: Option<Color>) {
+        assert_eq!(canvas.to_string(), "abcd\n");
+        let mut pools = CanvasPackedCellPools::new();
+        let screen = canvas.pack_with(&mut pools);
+        for col in 0..4 {
+            assert_eq!(canvas.is_no_select(col, 0), no_select, "column {col}");
+            let cell = screen
+                .cell_view(&pools, col, 0)
+                .expect("text cell must exist");
+            assert_eq!(
+                cell.style.unwrap_or_default().background_color,
+                background,
+                "composed selection background at column {col}"
+            );
+        }
+    }
+
     #[test]
     fn test_no_select_replay_precedes_selection_overlay_like_cc_ink_output_get() {
         let canvases: Vec<_> = smol::block_on(
@@ -379,19 +397,12 @@ mod tests {
                 ])))
                 .collect(),
         );
-        let canvas = canvases.last().unwrap();
-        assert_eq!(canvas.to_string(), "abcd\n");
-        for col in 0..4 {
-            assert!(canvas.is_no_select(col, 0));
-        }
-
-        let mut ansi = Vec::new();
-        canvas.write_ansi(&mut ansi).unwrap();
-        let ansi = String::from_utf8_lossy(&ansi);
-        let blue_bg = format!("{}", Colored::BackgroundColor(Color::Blue));
-        assert!(
-            !ansi.contains(&blue_bg),
-            "selection overlay must see replayed noSelect metadata before painting: {ansi:?}"
-        );
+        assert!(canvases.len() >= 2, "must render before and after noSelect");
+        // Positive control: the same live selection must really paint before
+        // the key event. A missing overlay hook must fail this assertion.
+        assert_selection_frame(canvases.first().unwrap(), false, Some(Color::Blue));
+        // The stable cached subtree now inherits the parent's noSelect flag;
+        // selection remains active, but its background must be absent.
+        assert_selection_frame(canvases.last().unwrap(), true, None);
     }
 }

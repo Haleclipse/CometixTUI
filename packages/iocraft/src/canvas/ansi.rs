@@ -10,6 +10,10 @@ impl Canvas {
     ) -> io::Result<()> {
         let row = self.row(y).unwrap_or(&[]);
         let overlay_row = self.overlays.get(y);
+        // Styling is gated separately from layout: at chalk level 0 CC's
+        // colorize.ts passes text through untouched, so no SGR is emitted at
+        // all, while erase-to-eol and OSC 8 hyperlinks still flow.
+        let ansi_styles = ansi && styles_enabled();
 
         let mut background_color = None;
         let mut text_style = CanvasTextStyle::default();
@@ -39,7 +43,7 @@ impl Canvas {
                 None => cell.background_color,
             };
 
-            if ansi && has_style {
+            if ansi_styles && has_style {
                 // Intensity (bold / dim) goes through
                 // `write_intensity_transition`, which owns SGR 22; it must not
                 // force a full SGR 0 here.
@@ -116,7 +120,7 @@ impl Canvas {
                 }
 
                 text_style = effective_style;
-            } else if ansi && !has_style {
+            } else if ansi_styles && !has_style {
                 // Empty cell without overlay — reset active attributes if needed.
                 if text_style.underline
                     || text_style.underline_color.is_some()
@@ -152,7 +156,7 @@ impl Canvas {
             col += cell_display_width;
             rendered_width = rendered_width.max(col);
 
-            if ansi && effective_bg != background_color {
+            if ansi_styles && effective_bg != background_color {
                 sgr_bg(&mut w, effective_bg.unwrap_or(Color::Reset))?;
                 background_color = effective_bg;
             }
@@ -229,7 +233,9 @@ impl Canvas {
             }
             if rendered_width < self.width {
                 erase_to_eol(&mut w)?;
-                sgr_reset(&mut w)?;
+                if ansi_styles {
+                    sgr_reset(&mut w)?;
+                }
             }
         }
         Ok(())
@@ -268,7 +274,7 @@ impl Canvas {
         ansi: bool,
         omit_final_newline: bool,
     ) -> io::Result<()> {
-        if ansi {
+        if ansi && styles_enabled() {
             sgr_reset(&mut w)?;
         }
         for y in 0..self.cells.len() {

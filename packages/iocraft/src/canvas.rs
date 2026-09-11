@@ -1,6 +1,6 @@
 use crate::ansi::{
     erase_to_eol, hyperlink_close, hyperlink_open, sgr_attr, sgr_bg, sgr_fg, sgr_reset,
-    sgr_underline_color,
+    sgr_underline_color, styles_enabled,
 };
 use crate::style::{Color, Weight};
 use crossterm::style::Attribute;

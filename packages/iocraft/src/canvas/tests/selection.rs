@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 use super::super::*;
 use crate::prelude::*;
-use crossterm::{csi, style::Colored};
+use crossterm::csi;
 
 #[test]
 fn test_selection_state_click_without_drag_does_not_select() {

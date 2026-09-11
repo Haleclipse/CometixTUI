@@ -360,7 +360,6 @@ impl UseSearchHighlight<'_> for Hooks<'_, '_> {
 mod tests {
     use super::*;
     use crate::{components::ContextProvider, prelude::*, Context};
-    use crossterm::style::Colored;
     use futures::StreamExt;
 
     #[component]
@@ -377,30 +376,51 @@ mod tests {
     fn SearchHighlightProviderApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let mut system = hooks.use_context_mut::<SystemContext>();
         let highlight = create_search_highlight_context(&mut hooks);
-        highlight.set_query("lazy");
-        highlight.set_positions(
-            vec![
-                TextMatchPosition {
-                    row: 0,
-                    col: 0,
-                    len: 4,
-                },
-                TextMatchPosition {
-                    row: 0,
-                    col: 5,
-                    len: 4,
-                },
-            ],
-            0,
-            1,
-        );
+        let mut phase = hooks.use_state(|| 0u8);
+        hooks.use_terminal_events(move |event| {
+            if let TerminalEvent::Key(KeyEvent {
+                code,
+                kind: KeyEventKind::Press,
+                ..
+            }) = event
+            {
+                match code {
+                    KeyCode::Char('n') => phase.set(1),
+                    KeyCode::Char('c') => phase.set(2),
+                    _ => {}
+                }
+            }
+        });
+        if phase.get() == 2 {
+            highlight.clear_query();
+            highlight.clear_positions();
+            system.exit();
+        } else {
+            highlight.set_query("lazy");
+            highlight.set_positions(
+                vec![
+                    TextMatchPosition {
+                        row: 0,
+                        col: 0,
+                        len: 4,
+                    },
+                    TextMatchPosition {
+                        row: 0,
+                        col: 5,
+                        len: 4,
+                    },
+                ],
+                0,
+                if phase.get() == 0 { 1 } else { 0 },
+            );
+        }
         hooks.use_search_highlight_overlay(highlight);
-        system.exit();
         element! {
             ContextProvider(value: Context::owned(highlight)) {
                 View(flex_direction: FlexDirection::Column) {
                     Text(content: "lazy lazy")
                     SearchHighlightConsumer
+                    Text(content: format!("phase{}", phase.get()))
                 }
             }
         }
@@ -408,23 +428,98 @@ mod tests {
 
     #[test]
     fn test_search_highlight_context_query_current_overlay_and_hook() {
-        let canvases: Vec<_> = smol::block_on(
-            element!(SearchHighlightProviderApp)
-                .mock_terminal_render_loop(MockTerminalConfig::default())
-                .collect::<Vec<_>>(),
+        let canvases: Vec<_> = smol::block_on(async {
+            let (tx, rx) = futures::channel::mpsc::unbounded();
+            let mut app = element!(SearchHighlightProviderApp);
+            let mut frames = app.mock_terminal_render_loop(MockTerminalConfig::with_events(rx));
+            let mut canvases = Vec::new();
+            // The mock output can still contain a queued frame after a key is
+            // sent. A rendered phase marker acknowledges the action without
+            // depending on the overlay style that this test is checking.
+            for (phase, key) in [(0, None), (1, Some('n')), (2, Some('c'))] {
+                if let Some(key) = key {
+                    tx.unbounded_send(TerminalEvent::Key(KeyEvent::new(
+                        KeyEventKind::Press,
+                        KeyCode::Char(key),
+                    )))
+                    .unwrap();
+                }
+                let marker = format!("phase{phase}");
+                let wait_for_phase = async {
+                    loop {
+                        let canvas = frames.next().await.expect("frame before fixture exit");
+                        let acknowledged = canvas.to_string().lines().any(|line| line == marker);
+                        canvases.push(canvas);
+                        if acknowledged {
+                            break;
+                        }
+                    }
+                };
+                match futures::future::select(
+                    Box::pin(wait_for_phase),
+                    Box::pin(smol::Timer::after(std::time::Duration::from_secs(5))),
+                )
+                .await
+                {
+                    futures::future::Either::Left(_) => {}
+                    futures::future::Either::Right(_) => panic!("timed out waiting for {marker}"),
+                }
+            }
+            assert!(
+                frames.next().await.is_none(),
+                "fixture must exit after clear"
+            );
+            canvases
+        });
+        let mut rows = Vec::new();
+        for canvas in &canvases {
+            assert!(canvas.to_string().starts_with("lazy lazy\n"));
+            let mut pools = CanvasPackedCellPools::new();
+            let screen = canvas.pack_with(&mut pools);
+            rows.push(
+                (0..9)
+                    .map(|col| {
+                        screen
+                            .cell_view(&pools, col, 0)
+                            .unwrap()
+                            .style
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        rows.dedup();
+        let expected = [Some(5..9), Some(0..4), None].map(|current| {
+            (0..9)
+                .map(|col| {
+                    let mut style = CanvasResolvedStyle::default();
+                    if let Some(current) = &current {
+                        style.text.invert = col != 4;
+                        if current.contains(&col) {
+                            style.text.color = Some(Color::Yellow);
+                            style.text.weight = Weight::Bold;
+                            style.text.underline = true;
+                        }
+                    }
+                    style
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            rows,
+            expected.to_vec(),
+            "current match must move from second to first, then all highlights clear"
         );
-        let canvas = canvases.last().unwrap();
-        assert!(canvas.resolved_text_style(0, 0).unwrap().invert);
-        let current = canvas.resolved_text_style(5, 0).unwrap();
-        assert!(current.invert);
-        assert_eq!(current.color, Some(Color::Yellow));
-        assert!(current.underline);
-        assert_eq!(current.weight, Weight::Bold);
-        let mut ansi = Vec::new();
-        canvas.write_ansi(&mut ansi).unwrap();
-        let ansi = String::from_utf8_lossy(&ansi);
-        assert!(ansi.contains(&format!("{}", Colored::ForegroundColor(Color::Yellow))));
-        assert!(canvas.to_string().contains("enabled=true query=\"lazy\""));
+        assert!(canvases
+            .first()
+            .unwrap()
+            .to_string()
+            .contains("enabled=true query=\"lazy\""));
+        assert!(canvases
+            .last()
+            .unwrap()
+            .to_string()
+            .contains("enabled=true query=\"\""));
     }
 
     #[component]

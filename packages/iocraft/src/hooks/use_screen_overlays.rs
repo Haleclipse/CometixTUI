@@ -57,7 +57,6 @@ impl UseScreenOverlays<'_> for Hooks<'_, '_> {
 mod tests {
     use super::*;
     use crate::{prelude::*, SelectionController, TextMatchPosition};
-    use crossterm::style::Colored;
     use futures::StreamExt;
 
     #[component]
@@ -106,23 +105,29 @@ mod tests {
         );
         let canvas = canvases.last().unwrap();
 
-        let selected_query = canvas.resolved_text_style(0, 0).unwrap();
-        assert!(
-            selected_query.invert,
-            "query highlight should compose on top of selection"
-        );
-        let mut ansi = Vec::new();
-        canvas.write_ansi(&mut ansi).unwrap();
-        let ansi = String::from_utf8_lossy(&ansi);
-        assert!(
-            ansi.contains(&format!("{}", Colored::BackgroundColor(Color::Blue))),
-            "selection background should survive query highlighting: {ansi:?}"
-        );
-
-        let current = canvas.resolved_text_style(5, 0).unwrap();
-        assert!(current.underline);
-        assert_eq!(current.weight, Weight::Bold);
-        assert!(current.invert);
-        assert_eq!(current.color, Some(Color::Yellow));
+        assert_eq!(canvas.to_string(), "lazy lazy\n");
+        let mut pools = CanvasPackedCellPools::new();
+        let screen = canvas.pack_with(&mut pools);
+        for col in 0..9 {
+            let mut expected = CanvasResolvedStyle::default();
+            if col < 4 {
+                expected.background_color = Some(Color::Blue);
+                expected.text.invert = true;
+            } else if col >= 5 {
+                expected.text.invert = true;
+                expected.text.underline = true;
+                expected.text.weight = Weight::Bold;
+                expected.text.color = Some(Color::Yellow);
+            }
+            assert_eq!(
+                screen
+                    .cell_view(&pools, col, 0)
+                    .unwrap()
+                    .style
+                    .unwrap_or_default(),
+                expected,
+                "selection/search composition at column {col}"
+            );
+        }
     }
 }

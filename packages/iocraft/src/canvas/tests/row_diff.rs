@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 use super::super::*;
 use crate::prelude::*;
-use crossterm::{csi, style::Colored};
+use crossterm::csi;
 
 #[test]
 fn test_subview_get_text_relative_coords() {

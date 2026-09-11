@@ -2850,7 +2850,11 @@ impl CanvasPackedScreen {
             sgr_reset(&mut w)?;
         }
         erase_to_eol(&mut w)?;
-        sgr_reset(&mut w)?;
+        // Level 0's zero-SGR contract: the erase itself is layout, but the
+        // trailing reset is styling and must not leak.
+        if crate::ansi::styles_enabled() {
+            sgr_reset(&mut w)?;
+        }
         Ok(())
     }
 

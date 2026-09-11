@@ -207,6 +207,10 @@ pub(super) fn write_canvas_style_transition<W: Write>(
     from: CanvasResolvedStyle,
     to: CanvasResolvedStyle,
 ) -> io::Result<()> {
+    // chalk level 0 = CC colorize.ts passthrough: no SGR of any kind.
+    if !crate::ansi::styles_enabled() {
+        return Ok(());
+    }
     let mut text_style = from.text;
     let mut background_color = from.background_color;
     let effective_style = to.text;
@@ -320,6 +324,10 @@ pub fn canvas_style_transition_to_ansi(
 #[derive(Clone, Debug, Default)]
 pub struct CanvasStyleTransitionCache {
     transitions: HashMap<(CanvasResolvedStyle, CanvasResolvedStyle), String>,
+    /// The color level the cached strings were encoded at. A runtime level
+    /// write (`chalk::set_stdout_level`, the `chalk.level =` primitive)
+    /// invalidates them wholesale.
+    level: Option<chalk::ColorLevel>,
 }
 
 impl CanvasStyleTransitionCache {
@@ -330,6 +338,11 @@ impl CanvasStyleTransitionCache {
 
     /// Returns the cached ANSI transition from `from` to `to`, computing it on first use.
     pub fn transition(&mut self, from: CanvasResolvedStyle, to: CanvasResolvedStyle) -> &str {
+        let level = crate::ansi::render_color_level();
+        if self.level != Some(level) {
+            self.transitions.clear();
+            self.level = Some(level);
+        }
         self.transitions
             .entry((from, to))
             .or_insert_with(|| canvas_style_transition_to_ansi(from, to))
@@ -370,6 +383,8 @@ struct CanvasAnsiRowCacheEntry {
 #[derive(Clone, Debug, Default)]
 pub struct CanvasAnsiRowCache {
     rows: HashMap<(usize, usize), CanvasAnsiRowCacheEntry>,
+    /// See [`CanvasStyleTransitionCache`]: cached bytes are level-specific.
+    level: Option<chalk::ColorLevel>,
 }
 
 impl CanvasAnsiRowCache {
@@ -394,6 +409,11 @@ impl CanvasAnsiRowCache {
         start_col: usize,
         mut w: W,
     ) -> io::Result<()> {
+        let level = crate::ansi::render_color_level();
+        if self.level != Some(level) {
+            self.rows.clear();
+            self.level = Some(level);
+        }
         let key = (y, start_col);
         let row = canvas.row(y).unwrap_or(&[]).to_vec();
         let overlays = canvas

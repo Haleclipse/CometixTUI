@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 use super::super::*;
 use crate::prelude::*;
-use crossterm::{csi, style::Colored};
+use crossterm::csi;
 
 #[test]
 fn test_canvas_diff_ignores_damage_only_metadata_like_cc_screen_diff_each() {
@@ -119,7 +119,7 @@ fn test_canvas_background_color() {
     // row 0
     write!(expected, csi!("0m")).unwrap();
     write!(expected, "  ").unwrap();
-    write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
+    write!(expected, csi!("101m")).unwrap();
     write!(expected, "   ").unwrap();
     write!(expected, csi!("0m")).unwrap();
     write!(expected, csi!("K")).unwrap();
@@ -127,7 +127,7 @@ fn test_canvas_background_color() {
     write!(expected, "\r\n").unwrap();
     // row 1
     write!(expected, "  ").unwrap();
-    write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
+    write!(expected, csi!("101m")).unwrap();
     write!(expected, "   ").unwrap();
     write!(expected, csi!("0m")).unwrap();
     write!(expected, csi!("K")).unwrap();
@@ -163,19 +163,19 @@ fn test_canvas_full_background_color() {
     // line 1: all 6 cells are emitted with the background. The row is
     // already full width, so no EL is needed at the right margin.
     write!(expected, csi!("0m")).unwrap();
-    write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
+    write!(expected, csi!("101m")).unwrap();
     write!(expected, "      ").unwrap();
     write!(expected, csi!("0m")).unwrap();
     write!(expected, "\r\n").unwrap();
 
     // line 2
-    write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
+    write!(expected, csi!("101m")).unwrap();
     write!(expected, "      ").unwrap();
     write!(expected, csi!("0m")).unwrap();
     write!(expected, "\r\n").unwrap();
 
     // line 3
-    write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
+    write!(expected, csi!("101m")).unwrap();
     write!(expected, "      ").unwrap();
     write!(expected, csi!("0m")).unwrap();
     write!(expected, "\r\n").unwrap();
@@ -279,7 +279,7 @@ fn test_canvas_style_transition_cache_matches_row_writer_sgr_order() {
     write!(expected, csi!("{}m"), Attribute::Bold.sgr()).unwrap();
     write!(expected, csi!("{}m"), Attribute::Underlined.sgr()).unwrap();
     write!(expected, csi!("{}m"), Attribute::Reverse.sgr()).unwrap();
-    write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Blue)).unwrap();
+    write!(expected, csi!("104m")).unwrap();
     let expected = String::from_utf8(expected).unwrap();
 
     assert_eq!(canvas_style_transition_to_ansi(default, default), "");
@@ -474,19 +474,19 @@ fn test_canvas_text_styles() {
     write!(expected, csi!("0m")).unwrap();
     write!(expected, ".").unwrap();
 
-    write!(expected, csi!("{}m"), Colored::ForegroundColor(Color::Red)).unwrap();
+    write!(expected, csi!("91m")).unwrap();
     write!(expected, csi!("{}m"), Attribute::Bold.sgr()).unwrap();
     write!(expected, csi!("{}m"), Attribute::Underlined.sgr()).unwrap();
     write!(expected, ".").unwrap();
 
     write!(expected, csi!("0m")).unwrap();
-    write!(expected, csi!("{}m"), Colored::ForegroundColor(Color::Red)).unwrap();
+    write!(expected, csi!("91m")).unwrap();
     write!(expected, csi!("{}m"), Attribute::Bold.sgr()).unwrap();
     write!(expected, csi!("{}m"), Attribute::Italic.sgr()).unwrap();
     write!(expected, ".").unwrap();
 
     write!(expected, csi!("0m")).unwrap();
-    write!(expected, csi!("{}m"), Colored::ForegroundColor(Color::Red)).unwrap();
+    write!(expected, csi!("91m")).unwrap();
     write!(expected, csi!("{}m"), Attribute::Bold.sgr()).unwrap();
     write!(expected, ".").unwrap();
 
@@ -501,36 +501,21 @@ fn test_canvas_text_styles() {
     write!(expected, csi!("{}m"), Attribute::NormalIntensity.sgr()).unwrap();
     write!(expected, ".").unwrap();
 
-    write!(
-        expected,
-        csi!("{}m"),
-        Colored::ForegroundColor(Color::Green)
-    )
-    .unwrap();
+    write!(expected, csi!("92m")).unwrap();
     write!(expected, ".").unwrap();
 
     write!(expected, csi!("{}m"), Attribute::Reverse.sgr()).unwrap();
     write!(expected, ".").unwrap();
 
     write!(expected, csi!("0m")).unwrap();
-    write!(
-        expected,
-        csi!("{}m"),
-        Colored::ForegroundColor(Color::Green)
-    )
-    .unwrap();
+    write!(expected, csi!("92m")).unwrap();
     write!(expected, ".").unwrap();
 
     write!(expected, csi!("{}m"), Attribute::CrossedOut.sgr()).unwrap();
     write!(expected, ".").unwrap();
 
     write!(expected, csi!("0m")).unwrap();
-    write!(
-        expected,
-        csi!("{}m"),
-        Colored::ForegroundColor(Color::Green)
-    )
-    .unwrap();
+    write!(expected, csi!("92m")).unwrap();
     write!(expected, csi!("{}m"), Attribute::OverLined.sgr()).unwrap();
     write!(expected, ".").unwrap();
 
@@ -560,10 +545,7 @@ fn test_canvas_ansi_underline_color_matches_cc_ink_sgr_parser() {
     canvas.write_ansi(&mut actual).unwrap();
     let actual = String::from_utf8(actual).unwrap();
     assert!(
-        actual.contains(&format!(
-            "\x1b[{}m",
-            Colored::UnderlineColor(Color::Rgb { r: 1, g: 2, b: 3 })
-        )),
+        actual.contains("\x1b[58;2;1;2;3m"),
         "underline color should emit SGR 58 truecolor: {actual:?}"
     );
 }
@@ -998,11 +980,23 @@ fn test_overlay_background_color_override() {
             ..Default::default()
         },
     );
-    let mut buf = Vec::new();
-    canvas.write_ansi(&mut buf).unwrap();
-    let output = String::from_utf8_lossy(&buf);
-    // Cell 0 should have Red background, cell 1 should have Blue (overridden by overlay).
-    assert!(output.contains(&format!("{}", Colored::BackgroundColor(Color::Blue))));
+    for backgrounds in [[Color::Red, Color::Blue, Color::Red], [Color::Red; 3]] {
+        let mut pools = CanvasPackedCellPools::new();
+        let screen = canvas.pack_with(&mut pools);
+        for (col, color) in backgrounds.into_iter().enumerate() {
+            assert_eq!(
+                screen
+                    .cell_view(&pools, col, 0)
+                    .unwrap()
+                    .style
+                    .unwrap_or_default()
+                    .background_color,
+                Some(color),
+                "column {col}"
+            );
+        }
+        canvas.clear_overlay(1, 0);
+    }
 }
 
 #[test]
@@ -1193,11 +1187,19 @@ fn test_copy_region_preserves_cells_metadata_and_clears_snapshot_damage() {
         copy.hyperlink_at(0, 0).as_deref(),
         Some("https://example.com")
     );
-    let mut ansi = Vec::new();
-    copy.write_ansi(&mut ansi).unwrap();
-    let ansi = String::from_utf8_lossy(&ansi);
-    assert!(ansi.contains(&format!("{}", Colored::BackgroundColor(Color::Blue))));
-    assert!(copy.is_no_select(2, 0));
+    let mut pools = CanvasPackedCellPools::new();
+    let screen = copy.pack_with(&mut pools);
+    for col in 0..3 {
+        let cell = screen.cell_view(&pools, col, 0).unwrap();
+        let style = cell.style.unwrap_or_default();
+        assert_eq!(
+            style.background_color,
+            if col == 1 { Some(Color::Blue) } else { None }
+        );
+        assert_eq!(style.text.color, Some(Color::Red));
+        assert_eq!(cell.hyperlink, Some("https://example.com"));
+        assert_eq!(copy.is_no_select(col, 0), col == 2);
+    }
     assert_eq!(copy.damage_region(), None);
 }
 
@@ -1457,4 +1459,99 @@ fn test_soft_wrap_metadata_shifts_with_rows() {
     canvas.shift_rows(0, 2, 1);
     assert_eq!(canvas.soft_wrap_continuation(0), 3);
     assert_eq!(canvas.soft_wrap_continuation(2), 0);
+}
+
+use crate::ansi::TestColorLevelGuard as ColorLevelGuard;
+
+fn styled_canvas() -> Canvas {
+    let mut canvas = Canvas::new(8, 1);
+    canvas.subview_mut(0, 0, 0, 0, 8, 1).set_text(
+        0,
+        0,
+        "hi",
+        CanvasTextStyle {
+            color: Some(Color::Rgb {
+                r: 215,
+                g: 119,
+                b: 87,
+            }),
+            weight: Weight::Bold,
+            ..Default::default()
+        },
+    );
+    canvas
+}
+
+/// Maps to CC at chalk level 0 (FORCE_COLOR=0 / TERM=dumb): colorize.ts is a
+/// full passthrough, so the row writer emits plain text with zero SGR bytes.
+/// Layout control (erase-to-eol) still flows; it is not styling.
+#[test]
+fn test_level_zero_row_writer_emits_no_sgr_at_all() {
+    let _guard = ColorLevelGuard::pin(0);
+    let mut out = Vec::new();
+    styled_canvas().write_ansi(&mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(
+        out.replace("\x1b[K", ""),
+        "hi\r\n",
+        "level 0 must produce plain text: {out:?}"
+    );
+}
+
+/// The same canvas on a 256-color terminal downgrades RGB through chalk's
+/// rgbToAnsi256 (node oracle: 174) while attributes flow untouched.
+#[test]
+fn test_level_two_row_writer_downgrades_rgb_and_keeps_attributes() {
+    let _guard = ColorLevelGuard::pin(2);
+    let mut out = Vec::new();
+    styled_canvas().write_ansi(&mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("\x1b[38;5;174m"), "{out:?}");
+    assert!(out.contains("\x1b[1m"), "{out:?}");
+    assert!(!out.contains("38;2;"), "{out:?}");
+}
+
+/// A runtime level write must invalidate cached transition strings and row
+/// bytes — the caches key on style pairs, not on the level they encoded at.
+#[test]
+fn test_style_caches_invalidate_on_level_change() {
+    let bold_orange = CanvasResolvedStyle {
+        text: CanvasTextStyle {
+            color: Some(Color::Rgb {
+                r: 215,
+                g: 119,
+                b: 87,
+            }),
+            weight: Weight::Bold,
+            ..Default::default()
+        },
+        background_color: None,
+    };
+    let mut transitions = CanvasStyleTransitionCache::new();
+    let mut rows = CanvasAnsiRowCache::new();
+    {
+        let _guard = ColorLevelGuard::pin(3);
+        assert!(transitions
+            .transition(CanvasResolvedStyle::default(), bold_orange)
+            .contains("38;2;215;119;87"));
+        let mut out = Vec::new();
+        rows.write_row(&styled_canvas(), 0, &mut out).unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("38;2;215;119;87"));
+    }
+    {
+        let _guard = ColorLevelGuard::pin(2);
+        assert!(transitions
+            .transition(CanvasResolvedStyle::default(), bold_orange)
+            .contains("38;5;174"));
+        let mut out = Vec::new();
+        rows.write_row(&styled_canvas(), 0, &mut out).unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("38;5;174"));
+    }
+    {
+        let _guard = ColorLevelGuard::pin(0);
+        assert_eq!(
+            transitions.transition(CanvasResolvedStyle::default(), bold_orange),
+            ""
+        );
+    }
 }

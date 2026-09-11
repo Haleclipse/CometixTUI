@@ -797,13 +797,29 @@ mod tests {
         let canvas = raw.render(None);
 
         assert_eq!(canvas.to_string(), "blue link\n");
-        let mut ansi = Vec::new();
-        canvas.write_ansi(&mut ansi).unwrap();
-        let ansi = String::from_utf8(ansi).unwrap();
-        assert!(
-            ansi.contains("\x1b[48;5;4m"),
-            "background should survive: {ansi:?}"
-        );
+        let mut pools = CanvasPackedCellPools::new();
+        let screen = canvas.pack_with(&mut pools);
+        for col in 0..9 {
+            let cell = screen.cell_view(&pools, col, 0).expect("text cell");
+            assert_eq!(
+                cell.style.unwrap_or_default().background_color,
+                if col < 4 {
+                    Some(Color::AnsiValue(4))
+                } else {
+                    None
+                },
+                "background/reset at column {col}"
+            );
+            assert_eq!(
+                cell.hyperlink,
+                if col >= 5 {
+                    Some("https://example.com")
+                } else {
+                    None
+                },
+                "OSC8 range at column {col}"
+            );
+        }
         assert_eq!(
             canvas.hyperlink_at(6, 0).as_deref(),
             Some("https://example.com")

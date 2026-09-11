@@ -883,8 +883,25 @@ impl UseSelection<'_> for Hooks<'_, '_> {
 mod tests {
     use super::*;
     use crate::{components::ContextProvider, prelude::*, Context};
-    use crossterm::style::Colored;
     use futures::StreamExt;
+
+    fn assert_bcd_background(canvas: &Canvas, background: Option<Color>) {
+        assert_eq!(canvas.get_text(0, 0, 6, 1), "abcdef");
+        let mut pools = CanvasPackedCellPools::new();
+        let screen = canvas.pack_with(&mut pools);
+        for col in 0..canvas.width() {
+            let cell = screen.cell_view(&pools, col, 0).expect("row cell");
+            assert_eq!(
+                cell.style.unwrap_or_default().background_color,
+                if (1..=3).contains(&col) {
+                    background
+                } else {
+                    None
+                },
+                "selection background at column {col}"
+            );
+        }
+    }
 
     fn canvas_with_text() -> Canvas {
         let mut canvas = Canvas::new(8, 1);
@@ -913,16 +930,17 @@ mod tests {
         let mut canvas = canvas_with_text();
         let text = selection.copy_selection_no_clear_text(&canvas);
         selection.apply_overlay(&mut canvas);
-        let highlighted = canvas
-            .resolved_text_style(1, 0)
-            .is_some_and(|style| !style.invert);
-        let mut ansi = Vec::new();
-        canvas.write_ansi(&mut ansi).unwrap();
-        let ansi = String::from_utf8_lossy(&ansi);
-        let theme_bg = ansi.contains(&format!(
-            "{}",
-            Colored::BackgroundColor(selection.selection_bg_color())
-        ));
+        assert_bcd_background(&canvas, Some(selection.selection_bg_color()));
+        let mut pools = CanvasPackedCellPools::new();
+        let screen = canvas.pack_with(&mut pools);
+        let background = screen
+            .cell_view(&pools, 1, 0)
+            .unwrap()
+            .style
+            .unwrap_or_default()
+            .background_color;
+        let highlighted = background.is_some();
+        let theme_bg = background == Some(selection.selection_bg_color());
         element!(Text(content: format!(
             "enabled={} has={} text={text:?} highlighted={highlighted} theme_bg={theme_bg}",
             selection.is_enabled(),
@@ -1033,10 +1051,7 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         let canvas = canvases.last().unwrap();
-        let mut ansi = Vec::new();
-        canvas.write_ansi(&mut ansi).unwrap();
-        let ansi = String::from_utf8_lossy(&ansi);
-        assert!(ansi.contains(&format!("{}", Colored::BackgroundColor(Color::DarkBlue))));
+        assert_bcd_background(canvas, Some(Color::DarkBlue));
         assert_eq!(
             canvas.damage_region(),
             Some(crate::canvas::DamageRegion {
@@ -1061,41 +1076,111 @@ mod tests {
         let mut system = hooks.use_context_mut::<SystemContext>();
         let selection = create_selection_context(&mut hooks);
         let mut phase = hooks.use_state(|| 0u8);
-        if !selection.has_selection() {
+        hooks.use_terminal_events(move |event| {
+            if let TerminalEvent::Key(KeyEvent {
+                code,
+                kind: KeyEventKind::Press,
+                ..
+            }) = event
+            {
+                match code {
+                    KeyCode::Char('n') => phase.set(1),
+                    KeyCode::Char('c') => phase.set(2),
+                    _ => {}
+                }
+            }
+        });
+        if phase.get() == 0 && !selection.has_selection() {
             set_bcd_selection(selection);
         }
-
-        let phase_value = *phase.read();
-        let color = if phase_value == 0 {
-            Color::DarkBlue
-        } else {
-            Color::DarkRed
-        };
-        hooks.use_selection_bg_color(selection, color);
-        hooks.use_selection_overlay(selection);
-
-        if phase_value == 0 {
-            phase.set(1);
-        } else {
+        hooks.use_selection_bg_color(
+            selection,
+            if phase.get() == 0 {
+                Color::DarkBlue
+            } else {
+                Color::DarkRed
+            },
+        );
+        if phase.get() == 2 {
+            selection.clear_selection();
+            assert!(!selection.has_selection());
             system.exit();
+        } else {
+            assert!(selection.has_selection());
         }
-
-        element!(Text(content: "abcdef"))
+        hooks.use_selection_overlay(selection);
+        element! {
+            View(flex_direction: FlexDirection::Column) {
+                Text(content: "abcdef")
+                Text(content: format!("phase{}", phase.get()))
+            }
+        }
     }
 
     #[test]
     fn test_use_selection_bg_color_tracks_theme_color_changes() {
-        let canvases: Vec<_> = smol::block_on(
-            element!(SelectionBgColorHookApp)
-                .mock_terminal_render_loop(MockTerminalConfig::default())
-                .collect::<Vec<_>>(),
+        let canvases: Vec<_> = smol::block_on(async {
+            let (tx, rx) = futures::channel::mpsc::unbounded();
+            let mut app = element!(SelectionBgColorHookApp);
+            let mut frames = app.mock_terminal_render_loop(MockTerminalConfig::with_events(rx));
+            let mut canvases = Vec::new();
+            // The mock output can still contain a queued frame after a key is
+            // sent. A rendered phase marker acknowledges the action without
+            // depending on the overlay style that this test is checking.
+            for (phase, key) in [(0, None), (1, Some('n')), (2, Some('c'))] {
+                if let Some(key) = key {
+                    tx.unbounded_send(TerminalEvent::Key(KeyEvent::new(
+                        KeyEventKind::Press,
+                        KeyCode::Char(key),
+                    )))
+                    .unwrap();
+                }
+                let marker = format!("phase{phase}");
+                let wait_for_phase = async {
+                    loop {
+                        let canvas = frames.next().await.expect("frame before fixture exit");
+                        let acknowledged = canvas.to_string().lines().any(|line| line == marker);
+                        canvases.push(canvas);
+                        if acknowledged {
+                            break;
+                        }
+                    }
+                };
+                match futures::future::select(
+                    Box::pin(wait_for_phase),
+                    Box::pin(smol::Timer::after(std::time::Duration::from_secs(5))),
+                )
+                .await
+                {
+                    futures::future::Either::Left(_) => {}
+                    futures::future::Either::Right(_) => panic!("timed out waiting for {marker}"),
+                }
+            }
+            assert!(
+                frames.next().await.is_none(),
+                "fixture must exit after clear"
+            );
+            canvases
+        });
+        let mut backgrounds = Vec::new();
+        for canvas in &canvases {
+            let mut pools = CanvasPackedCellPools::new();
+            let screen = canvas.pack_with(&mut pools);
+            let background = screen
+                .cell_view(&pools, 1, 0)
+                .unwrap()
+                .style
+                .unwrap_or_default()
+                .background_color;
+            assert_bcd_background(canvas, background);
+            backgrounds.push(background);
+        }
+        backgrounds.dedup();
+        assert_eq!(
+            backgrounds,
+            vec![Some(Color::DarkBlue), Some(Color::DarkRed), None],
+            "must paint, change theme, then clear selection in the same session"
         );
-        let canvas = canvases.last().unwrap();
-        let mut ansi = Vec::new();
-        canvas.write_ansi(&mut ansi).unwrap();
-        let ansi = String::from_utf8_lossy(&ansi);
-        assert!(ansi.contains(&format!("{}", Colored::BackgroundColor(Color::DarkRed))));
-        assert!(!ansi.contains(&format!("{}", Colored::BackgroundColor(Color::DarkBlue))));
     }
 
     #[component]

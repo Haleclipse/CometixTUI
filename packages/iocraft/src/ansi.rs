@@ -1,8 +1,5 @@
 use crate::style::Color;
-use crossterm::{
-    csi,
-    style::{Attribute, Colored},
-};
+use crossterm::{csi, style::Attribute};
 use std::{
     env,
     io::{self, IsTerminal, Write},
@@ -21,82 +18,184 @@ pub(crate) fn sgr_attr(w: &mut impl Write, attr: Attribute) -> io::Result<()> {
     write!(w, csi!("{}m"), attr.sgr())
 }
 
-pub(crate) fn sgr_fg(w: &mut impl Write, color: Color) -> io::Result<()> {
-    write!(
-        w,
-        csi!("{}m"),
-        Colored::ForegroundColor(normalize_color_for_terminal(color))
-    )
+/// The SGR channel a color is encoded for: foreground (38), background (48),
+/// or underline color (58).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ColorChannel {
+    Foreground,
+    Background,
+    Underline,
 }
 
-pub(crate) fn sgr_bg(w: &mut impl Write, color: Color) -> io::Result<()> {
-    write!(
-        w,
-        csi!("{}m"),
-        Colored::BackgroundColor(normalize_color_for_terminal(color))
-    )
-}
-
-pub(crate) fn sgr_underline_color(w: &mut impl Write, color: Color) -> io::Result<()> {
-    write!(
-        w,
-        csi!("{}m"),
-        Colored::UnderlineColor(normalize_color_for_terminal(color))
-    )
-}
-
-fn should_clamp_truecolor_for_tmux_with_env(
-    mut env_lookup: impl FnMut(&str) -> Option<String>,
-) -> bool {
-    // Mirrors CC Ink's colorize.ts tmux clamp: default tmux often fails to
-    // re-emit truecolor background SGR to the outer terminal unless users have
-    // configured Tc/RGB passthrough. Downgrade RGB colors to ANSI-256 unless the
-    // explicit escape hatch is set.
-    env_lookup("TMUX").is_some() && env_lookup("CLAUDE_CODE_TMUX_TRUECOLOR").is_none()
-}
-
-fn should_clamp_truecolor_for_tmux() -> bool {
-    static CLAMP: OnceLock<bool> = OnceLock::new();
-    *CLAMP.get_or_init(|| should_clamp_truecolor_for_tmux_with_env(|key| env::var(key).ok()))
-}
-
-fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
-    if r == g && g == b {
-        if r < 8 {
-            return 16;
+impl ColorChannel {
+    /// The chalk close code restoring the channel's default (39/49/59).
+    fn close_code(self) -> u8 {
+        match self {
+            Self::Foreground => 39,
+            Self::Background => 49,
+            Self::Underline => 59,
         }
-        if r > 248 {
-            return 231;
-        }
-        return (((r as f32 - 8.0) / 247.0 * 24.0).round() as u8) + 232;
     }
+}
 
-    let r = (r as f32 / 255.0 * 5.0).round() as u8;
-    let g = (g as f32 / 255.0 * 5.0).round() as u8;
-    let b = (b as f32 / 255.0 * 5.0).round() as u8;
-    16 + (36 * r) + (6 * g) + b
+// Per-thread level override for tests. The production singleton path is
+// unreachable under `cargo test` (stdout is a pipe → full fidelity), so
+// level-dependent behavior is exercised through this hook instead; being
+// thread-local, concurrent tests cannot race each other.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_COLOR_LEVEL: std::cell::Cell<Option<chalk::ColorLevel>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Pins the per-thread color level for a test and restores detection on drop,
+/// so a panicking assertion cannot leak the override into reused threads.
+#[cfg(test)]
+pub(crate) struct TestColorLevelGuard;
+
+#[cfg(test)]
+impl TestColorLevelGuard {
+    pub(crate) fn pin(level: chalk::ColorLevel) -> Self {
+        TEST_COLOR_LEVEL.with(|cell| cell.set(Some(level)));
+        TestColorLevelGuard
+    }
 }
 
 #[cfg(test)]
-fn normalize_color_for_terminal_with_env(
-    color: Color,
-    env_lookup: impl FnMut(&str) -> Option<String>,
-) -> Color {
-    if should_clamp_truecolor_for_tmux_with_env(env_lookup) {
-        if let Color::Rgb { r, g, b } = color {
-            return Color::AnsiValue(rgb_to_ansi256(r, g, b));
-        }
+impl Drop for TestColorLevelGuard {
+    fn drop(&mut self) {
+        TEST_COLOR_LEVEL.with(|cell| cell.set(None));
     }
-    color
 }
 
-fn normalize_color_for_terminal(color: Color) -> Color {
-    if should_clamp_truecolor_for_tmux() {
-        if let Color::Rgb { r, g, b } = color {
-            return Color::AnsiValue(rgb_to_ansi256(r, g, b));
+/// The color level canvas SGR output is encoded at. On a terminal this reads
+/// chalk's stdout singleton on every call — as in ink, where a runtime write
+/// to `chalk.level` (the primitive CC's boost/clamp uses) affects all
+/// subsequent output. Only stdout's tty nature is cached: it cannot change
+/// mid-process, and skipping the isatty syscall keeps per-transition encoding
+/// cheap. Off-terminal output (tests, pipes, render-to-string) stays at full
+/// fidelity: a canvas is a structured intermediate representation, and
+/// downgrading is a property of the terminal actually attached.
+pub(crate) fn render_color_level() -> chalk::ColorLevel {
+    #[cfg(test)]
+    if let Some(level) = TEST_COLOR_LEVEL.with(|cell| cell.get()) {
+        return level;
+    }
+    static STDOUT_IS_TTY: OnceLock<bool> = OnceLock::new();
+    if *STDOUT_IS_TTY.get_or_init(|| io::stdout().is_terminal()) {
+        chalk::stdout_level()
+    } else {
+        3
+    }
+}
+
+/// Whether any SGR styling is emitted at all. At chalk level 0 (FORCE_COLOR=0,
+/// TERM=dumb) CC's colorize.ts is a full passthrough — no colors, no bold, no
+/// dim, zero SGR bytes. Layout control sequences (erase-to-eol, cursor motion)
+/// and OSC 8 hyperlinks are not styling and stay unaffected.
+pub(crate) fn styles_enabled() -> bool {
+    render_color_level() != 0
+}
+
+pub(crate) fn sgr_fg(w: &mut impl Write, color: Color) -> io::Result<()> {
+    sgr_color(w, color, ColorChannel::Foreground, render_color_level())
+}
+
+pub(crate) fn sgr_bg(w: &mut impl Write, color: Color) -> io::Result<()> {
+    sgr_color(w, color, ColorChannel::Background, render_color_level())
+}
+
+pub(crate) fn sgr_underline_color(w: &mut impl Write, color: Color) -> io::Result<()> {
+    sgr_color(w, color, ColorChannel::Underline, render_color_level())
+}
+
+/// Maps to ink colorize.ts: every structured color is encoded through chalk's
+/// model selection (chalk/index.js `getModelAnsi`), so output downgrades on
+/// 256-color and 16-color terminals exactly like CC. Level 0 makes this a
+/// no-op — the color half of colorize.ts's full passthrough; the attribute
+/// half is gated at the transition writers via [`styles_enabled`]. (NO_COLOR
+/// itself is ignored by chalk v6; the "colors only" NO_COLOR behavior is
+/// crossterm's `Colored::Display`, which this encoder deliberately replaces.)
+fn sgr_color(
+    w: &mut impl Write,
+    color: Color,
+    channel: ColorChannel,
+    level: chalk::ColorLevel,
+) -> io::Result<()> {
+    if level == 0 {
+        return Ok(());
+    }
+    match color {
+        Color::Reset => write!(w, csi!("{}m"), channel.close_code()),
+        Color::Rgb { r, g, b } => match level {
+            3 => match channel {
+                ColorChannel::Foreground => write!(w, csi!("38;2;{};{};{}m"), r, g, b),
+                ColorChannel::Background => write!(w, csi!("48;2;{};{};{}m"), r, g, b),
+                ColorChannel::Underline => write!(w, csi!("58;2;{};{};{}m"), r, g, b),
+            },
+            2 => write_ansi256(w, chalk::rgb_to_ansi256(r, g, b), channel),
+            _ => write_ansi16(w, chalk::rgb_to_ansi(r, g, b), channel),
+        },
+        Color::AnsiValue(code) => {
+            if level >= 2 {
+                write_ansi256(w, code, channel)
+            } else {
+                write_ansi16(w, chalk::ansi256_to_ansi(code), channel)
+            }
+        }
+        named => match ansi16_code(named) {
+            Some(code) => write_ansi16(w, code, channel),
+            None => Ok(()),
+        },
+    }
+}
+
+/// crossterm named colors as chalk/ansi-styles foreground open codes. The
+/// un-prefixed crossterm colors are the bright variants (its own 256-color
+/// mapping uses indices 9-15), so `Red` → 91 (redBright), `DarkRed` → 31 (red).
+fn ansi16_code(color: Color) -> Option<u8> {
+    Some(match color {
+        Color::Black => 30,
+        Color::DarkRed => 31,
+        Color::DarkGreen => 32,
+        Color::DarkYellow => 33,
+        Color::DarkBlue => 34,
+        Color::DarkMagenta => 35,
+        Color::DarkCyan => 36,
+        Color::Grey => 37,
+        Color::DarkGrey => 90,
+        Color::Red => 91,
+        Color::Green => 92,
+        Color::Yellow => 93,
+        Color::Blue => 94,
+        Color::Magenta => 95,
+        Color::Cyan => 96,
+        Color::White => 97,
+        _ => return None,
+    })
+}
+
+/// ansi-styles `wrapAnsi256`, plus chalk v6's 58;5 underline-color form.
+fn write_ansi256(w: &mut impl Write, code: u8, channel: ColorChannel) -> io::Result<()> {
+    match channel {
+        ColorChannel::Foreground => write!(w, csi!("38;5;{}m"), code),
+        ColorChannel::Background => write!(w, csi!("48;5;{}m"), code),
+        ColorChannel::Underline => write!(w, csi!("58;5;{}m"), code),
+    }
+}
+
+/// ansi-styles `wrapAnsi16` over a 30-37/90-97 base code. SGR 58 has no basic
+/// 16-color form, so chalk v6's `wrapUnderlineAnsi` maps the code onto its
+/// palette index instead.
+fn write_ansi16(w: &mut impl Write, code: u8, channel: ColorChannel) -> io::Result<()> {
+    match channel {
+        ColorChannel::Foreground => write!(w, csi!("{}m"), code),
+        ColorChannel::Background => write!(w, csi!("{}m"), code + 10),
+        ColorChannel::Underline => {
+            let palette = if code < 90 { code - 30 } else { code - 90 + 8 };
+            write!(w, csi!("58;5;{}m"), palette)
         }
     }
-    color
 }
 
 fn sanitize_hyperlink_href(href: &str) -> String {
@@ -375,44 +474,243 @@ mod tests {
         assert!(!supports_hyperlinks_env(&[("TERM_PROGRAM", "dumb")], false));
     }
 
-    fn normalize_color_env(color: super::Color, pairs: &[(&str, &str)]) -> super::Color {
-        super::normalize_color_for_terminal_with_env(color, |key| {
-            pairs
-                .iter()
-                .find_map(|(k, v)| (*k == key).then(|| (*v).to_string()))
-        })
+    fn sgr_bytes(color: super::Color, channel: super::ColorChannel, level: u8) -> String {
+        let mut buf = Vec::new();
+        super::sgr_color(&mut buf, color, channel, level).unwrap();
+        String::from_utf8(buf).unwrap()
     }
 
     #[test]
-    fn tmux_truecolor_clamp_matches_cc_ink_colorize_gate() {
-        let claude_orange = super::Color::Rgb {
+    fn color_encoding_matches_chalk_model_selection() {
+        use super::ColorChannel::{Background, Foreground};
+        let orange = super::Color::Rgb {
             r: 215,
             g: 119,
             b: 87,
         };
-        assert_eq!(normalize_color_env(claude_orange, &[]), claude_orange);
+        // Level 3 passes truecolor through (chalk wrapAnsi16m).
+        assert_eq!(sgr_bytes(orange, Foreground, 3), "\x1b[38;2;215;119;87m");
+        assert_eq!(sgr_bytes(orange, Background, 3), "\x1b[48;2;215;119;87m");
+        // Level 2 downgrades via rgbToAnsi256; node oracle says 174.
+        assert_eq!(sgr_bytes(orange, Foreground, 2), "\x1b[38;5;174m");
+        assert_eq!(sgr_bytes(orange, Background, 2), "\x1b[48;5;174m");
+        // Level 1 collapses onto the 16-color range; node oracle says 31/41.
+        assert_eq!(sgr_bytes(orange, Foreground, 1), "\x1b[31m");
+        assert_eq!(sgr_bytes(orange, Background, 1), "\x1b[41m");
+    }
+
+    #[test]
+    fn named_colors_encode_as_chalk_bare_codes() {
+        use super::ColorChannel::{Background, Foreground, Underline};
+        // Bun + rebuild's ansi-styles oracle, including crossterm's bright
+        // unprefixed names: Blue is blueBright (94 foreground, 104 background).
+        let cases = [
+            (super::Color::Black, 30, 40, 0),
+            (super::Color::DarkRed, 31, 41, 1),
+            (super::Color::DarkGreen, 32, 42, 2),
+            (super::Color::DarkYellow, 33, 43, 3),
+            (super::Color::DarkBlue, 34, 44, 4),
+            (super::Color::DarkMagenta, 35, 45, 5),
+            (super::Color::DarkCyan, 36, 46, 6),
+            (super::Color::Grey, 37, 47, 7),
+            (super::Color::DarkGrey, 90, 100, 8),
+            (super::Color::Red, 91, 101, 9),
+            (super::Color::Green, 92, 102, 10),
+            (super::Color::Yellow, 93, 103, 11),
+            (super::Color::Blue, 94, 104, 12),
+            (super::Color::Magenta, 95, 105, 13),
+            (super::Color::Cyan, 96, 106, 14),
+            (super::Color::White, 97, 107, 15),
+        ];
+        for (color, foreground, background, palette) in cases {
+            for level in 0..=3 {
+                for (channel, expected) in [
+                    (Foreground, format!("\x1b[{foreground}m")),
+                    (Background, format!("\x1b[{background}m")),
+                    // Underline uses SGR 58's palette form, not a basic code.
+                    (Underline, format!("\x1b[58;5;{palette}m")),
+                ] {
+                    assert_eq!(
+                        sgr_bytes(color, channel, level),
+                        if level == 0 { "" } else { &expected },
+                        "{color:?}, {channel:?}, level {level}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ansi256_values_collapse_only_below_level_two() {
+        use super::ColorChannel::Foreground;
         assert_eq!(
-            normalize_color_env(claude_orange, &[("TMUX", "/tmp/tmux")]),
-            super::Color::AnsiValue(174)
+            sgr_bytes(super::Color::AnsiValue(255), Foreground, 2),
+            "\x1b[38;5;255m"
         );
+        // node ansi-styles oracle: ansi256ToAnsi(255) → 37 (not bright).
         assert_eq!(
-            normalize_color_env(
-                claude_orange,
-                &[("TMUX", "/tmp/tmux"), ("CLAUDE_CODE_TMUX_TRUECOLOR", "1")]
-            ),
-            claude_orange
+            sgr_bytes(super::Color::AnsiValue(255), Foreground, 1),
+            "\x1b[37m"
         );
+    }
+
+    #[test]
+    fn underline_colors_use_chalk_v6_palette_form() {
+        use super::ColorChannel::Underline;
+        let orange = super::Color::Rgb {
+            r: 215,
+            g: 119,
+            b: 87,
+        };
+        // Named codes map onto palette indices (wrapUnderlineAnsi).
         assert_eq!(
-            normalize_color_env(
-                super::Color::Rgb {
-                    r: 240,
-                    g: 240,
-                    b: 240
-                },
-                &[("TMUX", "/tmp/tmux")]
-            ),
-            super::Color::AnsiValue(255)
+            sgr_bytes(super::Color::DarkRed, Underline, 3),
+            "\x1b[58;5;1m"
         );
+        assert_eq!(sgr_bytes(super::Color::Red, Underline, 3), "\x1b[58;5;9m");
+        assert_eq!(sgr_bytes(orange, Underline, 3), "\x1b[58;2;215;119;87m");
+        assert_eq!(sgr_bytes(orange, Underline, 2), "\x1b[58;5;174m");
+    }
+
+    #[test]
+    fn reset_uses_channel_close_codes_and_level_zero_suppresses_colors() {
+        use super::ColorChannel::{Background, Foreground, Underline};
+        for level in 0..=3 {
+            for (channel, expected) in [
+                (Foreground, "\x1b[39m"),
+                (Background, "\x1b[49m"),
+                (Underline, "\x1b[59m"),
+            ] {
+                assert_eq!(
+                    sgr_bytes(super::Color::Reset, channel, level),
+                    if level == 0 { "" } else { expected }
+                );
+            }
+        }
+        // The color half of level 0's full passthrough: this encoder emits
+        // nothing, including close codes. The attribute half lives in the
+        // transition writers' `styles_enabled` gate.
+        let orange = super::Color::Rgb {
+            r: 215,
+            g: 119,
+            b: 87,
+        };
+        assert_eq!(sgr_bytes(orange, Foreground, 0), "");
+        assert_eq!(sgr_bytes(super::Color::Reset, Background, 0), "");
+    }
+
+    #[test]
+    fn all_palette_entries_match_bun_downgrade_oracle() {
+        use super::ColorChannel::{Background, Foreground, Underline};
+        // Literal ansi256ToAnsi results from rebuild's ansi-styles under Bun.
+        const ANSI16: [u8; 256] = [
+            30, 31, 32, 33, 34, 35, 36, 37, 90, 91, 92, 93, 94, 95, 96, 97, 30, 30, 30, 34, 34, 94,
+            30, 30, 30, 34, 34, 94, 30, 30, 30, 34, 34, 94, 32, 32, 32, 36, 36, 96, 32, 32, 32, 36,
+            36, 96, 92, 92, 92, 96, 96, 96, 30, 30, 30, 34, 34, 94, 30, 30, 30, 34, 34, 94, 30, 30,
+            30, 34, 34, 94, 32, 32, 32, 36, 36, 96, 32, 32, 32, 36, 36, 96, 92, 92, 92, 96, 96, 96,
+            30, 30, 30, 34, 34, 94, 30, 30, 30, 34, 34, 94, 30, 30, 30, 34, 34, 94, 32, 32, 32, 36,
+            36, 96, 32, 32, 32, 36, 36, 96, 92, 92, 92, 96, 96, 96, 31, 31, 31, 35, 35, 95, 31, 31,
+            31, 35, 35, 95, 31, 31, 31, 35, 35, 95, 33, 33, 33, 37, 37, 97, 33, 33, 33, 37, 37, 97,
+            93, 93, 93, 97, 97, 97, 31, 31, 31, 35, 35, 95, 31, 31, 31, 35, 35, 95, 31, 31, 31, 35,
+            35, 95, 33, 33, 33, 37, 37, 97, 33, 33, 33, 37, 37, 97, 93, 93, 93, 97, 97, 97, 91, 91,
+            91, 95, 95, 95, 91, 91, 91, 95, 95, 95, 91, 91, 91, 95, 95, 95, 93, 93, 93, 97, 97, 97,
+            93, 93, 93, 97, 97, 97, 93, 93, 93, 97, 97, 97, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30,
+            30, 30, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37,
+        ];
+        for (index, basic) in ANSI16.into_iter().enumerate() {
+            for level in 0..=3 {
+                let color = super::Color::AnsiValue(index as u8);
+                let palette = if level == 1 {
+                    if basic < 90 {
+                        basic - 30
+                    } else {
+                        basic - 90 + 8
+                    }
+                } else {
+                    index as u8
+                };
+                for (channel, expected) in [
+                    (
+                        Foreground,
+                        if level == 1 {
+                            format!("\x1b[{basic}m")
+                        } else {
+                            format!("\x1b[38;5;{index}m")
+                        },
+                    ),
+                    (
+                        Background,
+                        if level == 1 {
+                            format!("\x1b[{}m", basic + 10)
+                        } else {
+                            format!("\x1b[48;5;{index}m")
+                        },
+                    ),
+                    (Underline, format!("\x1b[58;5;{palette}m")),
+                ] {
+                    assert_eq!(
+                        sgr_bytes(color, channel, level),
+                        if level == 0 { "" } else { &expected },
+                        "palette {index}, {channel:?}, level {level}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rgb_boundaries_match_bun_downgrade_oracle() {
+        use super::ColorChannel::{Background, Foreground, Underline};
+        // RGB + literal rgbToAnsi256/rgbToAnsi results from Bun's source
+        // oracle: grayscale endpoints and color-cube rounding boundaries.
+        let cases = [
+            (0, 0, 0, 16, 30),
+            (7, 7, 7, 16, 30),
+            (8, 8, 8, 232, 30),
+            (127, 127, 127, 244, 37),
+            (128, 128, 128, 244, 37),
+            (248, 248, 248, 255, 37),
+            (249, 249, 249, 231, 97),
+            (255, 255, 255, 231, 97),
+            (255, 0, 0, 196, 91),
+            (0, 255, 0, 46, 92),
+            (0, 0, 255, 21, 94),
+            (255, 255, 0, 226, 93),
+            (0, 255, 255, 51, 96),
+            (255, 0, 255, 201, 95),
+            (215, 119, 87, 174, 31),
+            (25, 76, 127, 24, 30),
+            (26, 77, 128, 67, 34),
+        ];
+        for (r, g, b, palette, basic) in cases {
+            let color = super::Color::Rgb { r, g, b };
+            for level in 0..=3 {
+                for (channel, prefix) in [(Foreground, 38), (Background, 48), (Underline, 58)] {
+                    let expected = match level {
+                        0 => String::new(),
+                        3 => format!("\x1b[{prefix};2;{r};{g};{b}m"),
+                        2 => format!("\x1b[{prefix};5;{palette}m"),
+                        _ if channel == Underline => {
+                            let index = if basic < 90 {
+                                basic - 30
+                            } else {
+                                basic - 90 + 8
+                            };
+                            format!("\x1b[58;5;{index}m")
+                        }
+                        _ => format!(
+                            "\x1b[{}m",
+                            basic + if channel == Background { 10 } else { 0 }
+                        ),
+                    };
+                    assert_eq!(
+                        sgr_bytes(color, channel, level),
+                        expected,
+                        "{color:?}, {channel:?}, level {level}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
