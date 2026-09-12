@@ -150,7 +150,7 @@ fn CalculatorButton(props: &mut CalculatorButtonProps) -> impl Into<AnyElement<'
                 }),
                 border_edges: Edges::Top,
                 border_color: style.trim_color,
-                flex_grow: 1.0,
+                flex_grow: 1.0_f32,
                 margin_left: 1,
                 margin_right: 1,
             ) {
@@ -159,7 +159,7 @@ fn CalculatorButton(props: &mut CalculatorButtonProps) -> impl Into<AnyElement<'
                     justify_content: JustifyContent::CENTER,
                     align_items: AlignItems::CENTER,
                     height: 3,
-                    flex_grow: 1.0,
+                    flex_grow: 1.0_f32,
                 ) {
                     Text(
                         content: &props.label,
@@ -369,12 +369,12 @@ fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             gap: 1,
         ) {
             View(
-                flex_grow: 1.0,
+                flex_grow: 1.0_f32,
             ) {
                 View(
                     max_width: 120,
                     max_height: 40,
-                    flex_grow: 1.0,
+                    flex_grow: 1.0_f32,
                 ) {
                     ContextProvider(value: Context::owned(theme.get())) {
                         Calculator

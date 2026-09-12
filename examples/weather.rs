@@ -246,7 +246,7 @@ fn Weather(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             flex_direction: FlexDirection::Column,
         ) {
             View(
-                flex_grow: 1.0,
+                flex_grow: 1.0_f32,
             ) {
                 #(match &*state.read() {
                     WeatherState::Loaded(Ok(data)) => element! {
