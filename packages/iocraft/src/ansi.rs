@@ -373,9 +373,9 @@ pub(crate) fn wrap_for_multiplexer_sequence(
 /// DCS passthrough for OSC notification/progress sequences to reach the outer
 /// terminal, while raw BEL must remain unwrapped so tmux can use it as a bell.
 pub(crate) fn current_multiplexer_passthrough() -> MultiplexerPassthrough {
-    if env::var_os("TMUX").is_some() {
+    if env::var_os("TMUX").is_some_and(|v| !v.is_empty()) {
         MultiplexerPassthrough::Tmux
-    } else if env::var_os("STY").is_some() {
+    } else if env::var_os("STY").is_some_and(|v| !v.is_empty()) {
         MultiplexerPassthrough::Screen
     } else {
         MultiplexerPassthrough::None
@@ -412,10 +412,17 @@ pub(crate) fn sanitize_osc_payload(text: &str) -> String {
 ///
 /// This is the Rust terminal-output counterpart to CC Ink's `setClipboard` raw
 /// sequence (`ESC ] 52 ; c ; <base64> BEL`). Multiplexer/native-clipboard
-/// transports remain an application concern; this helper provides the terminal
-/// escape sequence needed by fullscreen selection copy.
+/// transports are owned by the shared Clipboard service; this helper also
+/// preserves the legacy raw OSC path when no service is provided.
 pub(crate) fn osc52_clipboard_sequence(text: &str) -> String {
-    format!("\x1b]52;c;{}\x07", base64_encode(text.as_bytes()))
+    osc52_clipboard_sequence_with_kitty(text, false)
+}
+
+/// Clipboard callers supply the resolved terminal identity; tmux inner OSC
+/// intentionally retains BEL regardless of the outer terminal.
+pub(crate) fn osc52_clipboard_sequence_with_kitty(text: &str, is_kitty: bool) -> String {
+    let terminator = if is_kitty { "\x1b\\" } else { "\x07" };
+    format!("\x1b]52;c;{}{terminator}", base64_encode(text.as_bytes()))
 }
 
 pub(crate) fn osc52_clipboard_sequence_for_multiplexer(

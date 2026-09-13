@@ -24,7 +24,7 @@ pub struct SelectionClipboardNotificationsProps<'a> {
     pub notifications: Option<NotificationContext>,
     /// Whether copy feedback is active. Defaults to `true`.
     pub active: Option<bool>,
-    /// Toast wording/transport label. Defaults to OSC 52, iocraft's clipboard path.
+    /// Toast wording/transport label. Defaults to the stdout handle's resolved clipboard path.
     pub clipboard_path: Option<SelectionClipboardPath>,
 }
 
@@ -48,12 +48,15 @@ pub fn SelectionClipboardNotifications<'a>(
     let notifications = props
         .notifications
         .unwrap_or_else(|| hooks.use_notifications());
+    let clipboard_path = props
+        .clipboard_path
+        .unwrap_or_else(|| stdout.get_clipboard_path());
     hooks.use_selection_copy_notifications(
         selection,
         stdout,
         notifications,
         props.active.unwrap_or(true),
-        props.clipboard_path.unwrap_or_default(),
+        clipboard_path,
     );
 
     element! {

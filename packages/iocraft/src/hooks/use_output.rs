@@ -1,6 +1,6 @@
-use super::SelectionContext;
+use super::{SelectionClipboardPath, SelectionContext, UseContext};
 use crate::{
-    Canvas, ClipboardMultiplexer, ComponentUpdater, Hook, Hooks, SelectionController,
+    Canvas, Clipboard, ClipboardMultiplexer, ComponentUpdater, Hook, Hooks, SelectionController,
     SelectionState,
 };
 use core::{
@@ -8,6 +8,8 @@ use core::{
     task::{Context, Poll, Waker},
 };
 use crossterm::{cursor, QueueableCommand};
+use futures::{channel::oneshot, future::BoxFuture};
+use std::io;
 use std::{
     borrow::Cow,
     sync::{Arc, Mutex},
@@ -59,7 +61,11 @@ pub trait UseOutput: private::Sealed {
 
 impl UseOutput for Hooks<'_, '_> {
     fn use_output(&mut self) -> (StdoutHandle, StderrHandle) {
+        let clipboard = self
+            .try_use_context::<Clipboard>()
+            .map(|value| value.clone());
         let output = self.use_hook(UseOutputImpl::default);
+        output.clipboard = clipboard;
         (output.use_stdout(), output.use_stderr())
     }
 }
@@ -69,6 +75,7 @@ enum Message {
     StdoutNoNewline(String),
     StdoutClipboard(String, ClipboardMultiplexer),
     StdoutControl(String),
+    StdoutControlAcknowledged(String, oneshot::Sender<io::Result<()>>),
     Stderr(String),
     StderrNoNewline(String),
 }
@@ -77,13 +84,16 @@ impl Message {
     fn affects_visible_output(&self) -> bool {
         !matches!(
             self,
-            Message::StdoutClipboard(..) | Message::StdoutControl(_)
+            Message::StdoutClipboard(..)
+                | Message::StdoutControl(_)
+                | Message::StdoutControlAcknowledged(..)
         )
     }
 }
 
 #[derive(Default)]
 struct UseOutputState {
+    closed: bool,
     queue: Vec<Message>,
     waker: Option<Waker>,
     appended_newline: Option<u16>,
@@ -246,6 +256,10 @@ impl UseOutputState {
                 Message::StdoutControl(sequence) => {
                     let _ = terminal.write_control_sequence(&sequence);
                 }
+                Message::StdoutControlAcknowledged(sequence, sender) => {
+                    let result = terminal.write_control_sequence(&sequence);
+                    let _ = sender.send(result);
+                }
                 Message::Stderr(msg) => {
                     let mut formatted = normalize_terminal_newlines(&msg).into_owned();
                     formatted.push_str("\r\n");
@@ -282,9 +296,72 @@ impl UseOutputState {
 #[derive(Clone)]
 pub struct StdoutHandle {
     state: Arc<Mutex<UseOutputState>>,
+    clipboard: Option<Clipboard>,
 }
 
 impl StdoutHandle {
+    pub(crate) fn without_clipboard(mut self) -> Self {
+        self.clipboard = None;
+        self
+    }
+
+    /// Starts native/tmux clipboard work and returns the sequence to write.
+    /// This intentionally does not wait for native clipboard completion.
+    pub fn prepare_clipboard(&self, text: &str) -> BoxFuture<'static, String> {
+        if let Some(clipboard) = &self.clipboard {
+            clipboard.set_clipboard(text)
+        } else {
+            let sequence = crate::ansi::osc52_clipboard_sequence(text);
+            Box::pin(async move { sequence })
+        }
+    }
+
+    /// Notification confidence, resolved by the shared clipboard policy.
+    pub fn get_clipboard_path(&self) -> SelectionClipboardPath {
+        self.clipboard
+            .as_ref()
+            .map(Clipboard::get_clipboard_path)
+            .unwrap_or_default()
+    }
+
+    /// Queues raw bytes immediately. Resolves after the terminal writer accepts
+    /// them. A bound Clipboard routes to its retained root queue, surviving
+    /// child unmount. Unmounting that output owner reports BrokenPipe.
+    pub fn write_control_sequence_and_wait<S: ToString>(
+        &self,
+        sequence: S,
+    ) -> BoxFuture<'static, io::Result<()>> {
+        let sequence = sequence.to_string();
+        if let Some(root) = self.clipboard.as_ref().and_then(Clipboard::output) {
+            return root.enqueue_control_sequence_and_wait(sequence);
+        }
+        self.enqueue_control_sequence_and_wait(sequence)
+    }
+
+    fn enqueue_control_sequence_and_wait(
+        &self,
+        sequence: String,
+    ) -> BoxFuture<'static, io::Result<()>> {
+        let (sender, receiver) = oneshot::channel();
+        let mut state = self.state.lock().unwrap();
+        if !state.closed {
+            state
+                .queue
+                .push(Message::StdoutControlAcknowledged(sequence, sender));
+            if let Some(waker) = state.waker.take() {
+                waker.wake();
+            }
+        }
+        Box::pin(async move {
+            receiver.await.unwrap_or_else(|_| {
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "terminal output owner was unmounted",
+                ))
+            })
+        })
+    }
+
     /// Queues a message to be written asynchronously to stdout, above the rendered component
     /// output.
     pub fn println<S: ToString>(&self, msg: S) {
@@ -332,6 +409,15 @@ impl StdoutHandle {
     /// sequence: it does not clear or reposition the retained render canvas.
     /// This makes it suitable for fullscreen text-selection copy behavior.
     pub fn set_clipboard<S: ToString>(&self, text: S) {
+        if let Some(clipboard) = &self.clipboard {
+            let prepared = clipboard.set_clipboard(&text.to_string());
+            let stdout = self.clone();
+            clipboard.spawn(Box::pin(async move {
+                let sequence = prepared.await;
+                let _ = stdout.write_control_sequence_and_wait(sequence).await;
+            }));
+            return;
+        }
         self.set_clipboard_with_multiplexer(text, ClipboardMultiplexer::None);
     }
 
@@ -409,7 +495,9 @@ impl StdoutHandle {
         selection: &SelectionContext,
         canvas: &Canvas,
     ) -> Option<String> {
-        self.copy_on_select_context_with_multiplexer(selection, canvas, ClipboardMultiplexer::None)
+        let text = selection.copy_on_select_text(canvas)?;
+        self.set_clipboard(&text);
+        Some(text)
     }
 
     /// Runs app-level copy-on-select with an explicit multiplexer passthrough wrapper.
@@ -435,7 +523,9 @@ impl StdoutHandle {
         selection: &mut SelectionController,
         canvas: &Canvas,
     ) -> Option<String> {
-        self.copy_on_select_with_multiplexer(selection, canvas, ClipboardMultiplexer::None)
+        let text = selection.copy_on_select_text(canvas)?;
+        self.set_clipboard(&text);
+        Some(text)
     }
 
     /// Runs copy-on-select with an explicit multiplexer passthrough wrapper.
@@ -486,6 +576,15 @@ impl StderrHandle {
 #[derive(Default)]
 struct UseOutputImpl {
     state: Arc<Mutex<UseOutputState>>,
+    clipboard: Option<Clipboard>,
+}
+
+impl Drop for UseOutputImpl {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().unwrap();
+        state.closed = true;
+        state.queue.clear();
+    }
 }
 
 impl Hook for UseOutputImpl {
@@ -509,6 +608,7 @@ impl UseOutputImpl {
     pub fn use_stdout(&mut self) -> StdoutHandle {
         StdoutHandle {
             state: self.state.clone(),
+            clipboard: self.clipboard.clone(),
         }
     }
 
@@ -717,5 +817,317 @@ mod tests {
     #[apply(test!)]
     async fn test_use_output() {
         element!(MyComponent).render_loop().await.unwrap();
+    }
+    #[test]
+    fn control_ack_is_pending_until_write_and_closes_when_owner_unmounts() {
+        use futures::FutureExt;
+        let mut owner = UseOutputImpl::default();
+        let stdout = owner.use_stdout();
+        let mut ack = stdout.write_control_sequence_and_wait("\x1b]52;c;QQ==\x07");
+        assert!((&mut ack).now_or_never().is_none());
+        assert!(!owner.state.lock().unwrap().queue[0].affects_visible_output());
+        drop(owner);
+        assert_eq!(
+            futures::executor::block_on(ack).unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(
+            futures::executor::block_on(stdout.write_control_sequence_and_wait("late"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[cfg(feature = "unstable-output-streams")]
+    #[derive(Clone)]
+    struct AckProof {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        fail_control: bool,
+    }
+    #[cfg(feature = "unstable-output-streams")]
+    impl io::Write for AckProof {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.fail_control && bytes == b"\x1b]52;c;QQ==\x07" {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "controlled writer failure",
+                ));
+            }
+            self.bytes.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "unstable-output-streams")]
+    #[component]
+    fn AckApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let proof = hooks.use_context::<AckProof>().clone();
+        let (stdout, _) = hooks.use_output();
+        let mut done = hooks.use_state(|| false);
+        hooks.use_future(async move {
+            let result = stdout
+                .write_control_sequence_and_wait("\x1b]52;c;QQ==\x07")
+                .await;
+            if proof.fail_control {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+            } else {
+                result.unwrap();
+                assert!(proof
+                    .bytes
+                    .lock()
+                    .unwrap()
+                    .windows(b"\x1b]52;c;QQ==\x07".len())
+                    .any(|w| w == b"\x1b]52;c;QQ==\x07"));
+            }
+            done.set(true);
+        });
+        if done.get() {
+            hooks.use_context_mut::<SystemContext>().exit();
+        }
+        element!(View)
+    }
+
+    #[cfg(feature = "unstable-output-streams")]
+    #[apply(test!)]
+    async fn control_ack_observes_real_writer_bytes_and_failures() {
+        for fail_control in [false, true] {
+            let proof = AckProof {
+                bytes: Arc::new(Mutex::new(Vec::new())),
+                fail_control,
+            };
+            element! {
+                ContextProvider(value: crate::Context::owned(proof.clone())) { AckApp }
+            }
+            .render_loop()
+            .stdout(proof)
+            .await
+            .unwrap();
+        }
+    }
+    struct NoProcessBackend;
+    impl crate::ClipboardBackend for NoProcessBackend {
+        fn execute(
+            &self,
+            _: &str,
+            _: &[&str],
+            _: &str,
+            _: std::time::Duration,
+        ) -> BoxFuture<'static, i32> {
+            panic!("explicit multiplexer override must not invoke native or tmux processes")
+        }
+        fn spawn(&self, _: BoxFuture<'static, ()>) {
+            panic!("explicit override must not detach work")
+        }
+        fn is_kitty(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn explicit_clipboard_wrapper_bypasses_provider_policy_and_fallback_remains_osc52() {
+        let mut owner = UseOutputImpl::default();
+        owner.clipboard = Some(Clipboard::new(Arc::new(NoProcessBackend)));
+        let stdout = owner.use_stdout();
+        stdout.set_clipboard_with_multiplexer("A", ClipboardMultiplexer::Screen);
+        assert!(
+            matches!(&owner.state.lock().unwrap().queue[0], Message::StdoutClipboard(text, ClipboardMultiplexer::Screen) if text == "A")
+        );
+        owner.clipboard = None;
+        let plain = owner.use_stdout();
+        assert_eq!(
+            futures::executor::block_on(plain.prepare_clipboard("A")),
+            "\x1b]52;c;QQ==\x07"
+        );
+        assert_eq!(plain.get_clipboard_path(), SelectionClipboardPath::Osc52);
+    }
+
+    #[component]
+    fn ClipboardContextApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let (stdout, _) = hooks.use_output();
+        assert!(
+            stdout.clipboard.is_some(),
+            "output hook must capture its nearest Clipboard provider"
+        );
+        stdout.set_clipboard_with_multiplexer("A", ClipboardMultiplexer::Screen);
+        hooks.use_context_mut::<SystemContext>().exit();
+        element!(View)
+    }
+
+    #[apply(test!)]
+    async fn clipboard_context_is_inherited_by_the_real_output_hook() {
+        element! {
+            ContextProvider(value: crate::Context::owned(Clipboard::new(Arc::new(NoProcessBackend)))) {
+                ClipboardContextApp
+            }
+        }.render_loop().await.unwrap();
+    }
+    #[test]
+    fn clipboard_root_route_survives_child_drop_and_closes_with_root_without_cycles() {
+        use futures::FutureExt;
+        let mut root = UseOutputImpl::default();
+        let root_stdout = root.use_stdout();
+        let service = Clipboard::new(Arc::new(NoProcessBackend)).with_output(root_stdout);
+        let mut child = UseOutputImpl::default();
+        child.clipboard = Some(service);
+        let child_stdout = child.use_stdout();
+        // Rebinding a contextual handle strips its service; no recursive route.
+        let rebound = Clipboard::new(Arc::new(NoProcessBackend)).with_output(child_stdout.clone());
+        assert!(rebound.output().unwrap().clipboard.is_none());
+        drop(child);
+        let mut ack = child_stdout.write_control_sequence_and_wait("after child unmount");
+        assert!((&mut ack).now_or_never().is_none());
+        assert_eq!(root.state.lock().unwrap().queue.len(), 1);
+        drop(root);
+        assert_eq!(
+            futures::executor::block_on(ack).unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(
+            futures::executor::block_on(
+                child_stdout.write_control_sequence_and_wait("after root unmount")
+            )
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[cfg(feature = "unstable-output-streams")]
+    #[derive(Default)]
+    struct DeferredClipboardBackend {
+        tasks: Mutex<Vec<BoxFuture<'static, ()>>>,
+    }
+    #[cfg(feature = "unstable-output-streams")]
+    impl crate::ClipboardBackend for DeferredClipboardBackend {
+        fn execute(
+            &self,
+            _: &str,
+            _: &[&str],
+            _: &str,
+            _: std::time::Duration,
+        ) -> BoxFuture<'static, i32> {
+            Box::pin(async { 0 })
+        }
+        fn spawn(&self, task: BoxFuture<'static, ()>) {
+            self.tasks.lock().unwrap().push(task);
+        }
+        fn is_kitty(&self) -> bool {
+            true
+        }
+    }
+    #[cfg(feature = "unstable-output-streams")]
+    #[derive(Clone)]
+    struct LifetimeProof {
+        output: AckProof,
+        backend: Arc<DeferredClipboardBackend>,
+        child_unmounted: Arc<std::sync::atomic::AtomicBool>,
+    }
+    #[cfg(feature = "unstable-output-streams")]
+    #[derive(Clone)]
+    struct ChildControl {
+        visible: State<bool>,
+        unmounted: Arc<std::sync::atomic::AtomicBool>,
+    }
+    #[cfg(feature = "unstable-output-streams")]
+    struct MarkChildUnmount(Arc<std::sync::atomic::AtomicBool>);
+    #[cfg(feature = "unstable-output-streams")]
+    impl Hook for MarkChildUnmount {}
+    #[cfg(feature = "unstable-output-streams")]
+    impl Drop for MarkChildUnmount {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    #[cfg(feature = "unstable-output-streams")]
+    #[component]
+    fn ClipboardTransientChild(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let control = hooks.use_context::<ChildControl>().clone();
+        let unmounted = control.unmounted.clone();
+        hooks.use_hook(move || MarkChildUnmount(unmounted));
+        let (stdout, _) = hooks.use_output();
+        hooks.use_future(async move {
+            stdout.set_clipboard("A");
+            let mut visible = control.visible;
+            visible.set(false);
+        });
+        element!(View)
+    }
+    #[cfg(feature = "unstable-output-streams")]
+    #[component]
+    fn ClipboardRetainedRoot(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let proof = hooks.use_context::<LifetimeProof>().clone();
+        let (stdout, _) = hooks.use_output();
+        let clipboard = hooks
+            .use_state(|| Clipboard::new(proof.backend.clone()).with_output(stdout))
+            .read()
+            .clone();
+        let visible = hooks.use_state(|| true);
+        let mut done = hooks.use_state(|| false);
+        let child_control = ChildControl {
+            visible,
+            unmounted: proof.child_unmounted.clone(),
+        };
+        hooks.use_future(async move {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !proof
+                .child_unmounted
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "child did not unmount"
+                );
+                smol::Timer::after(std::time::Duration::from_millis(1)).await;
+            }
+            // Delay the detached clipboard continuation until the actual child
+            // output hook has been destroyed; the retained root still owns I/O.
+            let tasks = std::mem::take(&mut *proof.backend.tasks.lock().unwrap());
+            assert!(!tasks.is_empty());
+            for task in tasks {
+                task.await;
+            }
+            assert!(proof
+                .output
+                .bytes
+                .lock()
+                .unwrap()
+                .windows(b"52;c;QQ==".len())
+                .any(|w| w == b"52;c;QQ=="));
+            done.set(true);
+        });
+        if done.get() {
+            hooks.use_context_mut::<SystemContext>().exit();
+        }
+        element! {
+            ContextProvider(value: crate::Context::owned(clipboard)) {
+                ContextProvider(value: crate::Context::owned(child_control)) {
+                    #(if visible.get() { Some(element!(ClipboardTransientChild)) } else { None })
+                }
+            }
+        }
+    }
+    #[cfg(feature = "unstable-output-streams")]
+    #[apply(test!)]
+    async fn detached_clipboard_output_reaches_real_writer_after_child_unmount() {
+        let output = AckProof {
+            bytes: Arc::new(Mutex::new(Vec::new())),
+            fail_control: false,
+        };
+        let proof = LifetimeProof {
+            output: output.clone(),
+            backend: Arc::new(DeferredClipboardBackend::default()),
+            child_unmounted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        element! {
+            ContextProvider(value: crate::Context::owned(proof)) { ClipboardRetainedRoot }
+        }
+        .render_loop()
+        .stdout(output)
+        .await
+        .unwrap();
     }
 }
