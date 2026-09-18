@@ -68,7 +68,7 @@ Robust terminal lifecycle management ported from CC Ink's terminal layer:
 - **Suspend/resume (SIGCONT)** — self-healing redraw after Ctrl+Z; raw mode + keyboard enhancement auto-restore
 - **Panic recovery** — panic hook restores terminal state (raw mode, alternate screen) before printing the panic message
 - **Kitty keyboard protocol** — `SystemContext::set_keyboard_enhancement_flags` for disambiguating escape codes
-- **Terminal title** — `SystemContext::set_terminal_title` (OSC 0)
+- **Terminal title** — `use_terminal_title` hook; writes only when the title changes (OSC 0, `SetConsoleTitleW` fallback on legacy Windows conhost)
 - **Dual cursor mode** — `CursorDeclaration { visible }`: ink model (overlay cursor, physical hidden for IME only) or ratatui model (native terminal cursor)
 - **Inline diff safety** — bounded diff planning scans, terminal height-aware main-screen layout
 - **Fullscreen patch planners** — DECSTBM scroll-hint patch planning/serialization, cursor anchor/park patch planning, stateful retained-canvas frame planners

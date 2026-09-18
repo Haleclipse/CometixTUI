@@ -444,12 +444,25 @@ pub(crate) fn osc52_clipboard_for_multiplexer(
     w.write_all(osc52_clipboard_sequence_for_multiplexer(text, multiplexer).as_bytes())
 }
 
-pub(crate) fn terminal_title(w: &mut (impl Write + ?Sized), title: &str) -> io::Result<()> {
-    w.write_all(b"\x1b]0;")?;
-    for ch in title.chars().filter(|ch| !ch.is_control()) {
-        write!(w, "{ch}")?;
-    }
-    w.write_all(b"\x07")
+/// Filters a terminal title so it cannot terminate the OSC 0 payload or
+/// smuggle other controls. Titles are single-line, so unlike
+/// [`sanitize_osc_payload`] this also drops `\n` and `\t`.
+pub(crate) fn sanitize_terminal_title(title: &str) -> String {
+    title.chars().filter(|ch| !ch.is_control()).collect()
+}
+
+/// Builds the OSC 0 (icon + window title) sequence.
+///
+/// This is the byte-level counterpart to CC Ink's
+/// `osc(OSC.SET_TITLE_AND_ICON, title)`: it shares [`osc_sequence`]'s
+/// terminator policy (ST on Kitty, BEL elsewhere) and is intentionally not
+/// wrapped for tmux/screen, which handle OSC 0 natively via `set-titles`.
+///
+/// Windows delivers titles through crossterm's `SetTitle` instead, so this is
+/// only reachable from tests there.
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) fn terminal_title_sequence(title: &str) -> String {
+    osc_sequence(&["0".to_string(), sanitize_terminal_title(title)])
 }
 
 #[cfg(test)]
@@ -767,11 +780,14 @@ mod tests {
     }
 
     #[test]
-    fn terminal_title_filters_control_chars() {
-        let mut buf = Vec::new();
-        super::terminal_title(&mut buf, "safe\x1b]2;owned\x07").unwrap();
-        let output = String::from_utf8(buf).unwrap();
-        assert_eq!(output, "\x1b]0;safe]2;owned\x07");
+    fn terminal_title_sequence_filters_control_chars() {
+        let output = super::terminal_title_sequence("safe\x1b]2;owned\x07\n\ttail");
+        assert!(
+            output.starts_with("\x1b]0;safe]2;ownedtail"),
+            "unexpected OSC 0 payload: {output:?}"
+        );
+        assert!(output.ends_with('\x07') || output.ends_with("\x1b\\"));
         assert!(!output.contains("\x1b]2;owned"));
+        assert_eq!(super::sanitize_terminal_title("a\u{7f}b\u{80}c"), "abc");
     }
 }

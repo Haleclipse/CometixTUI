@@ -521,6 +521,16 @@ impl<'a> Terminal<'a> {
         self.inner.dest().write_all(sequence.as_bytes())
     }
 
+    /// Sets the terminal window/tab title.
+    ///
+    /// Like [`Self::write_control_sequence`], this is a non-visual side-band
+    /// write outside synchronized-update framing. The backend decides how to
+    /// deliver it: OSC 0 on Unix-likes, and crossterm's `SetTitle` on Windows so
+    /// legacy conhost without VT support still receives `SetConsoleTitleW`.
+    pub fn set_title(&mut self, title: &str) -> io::Result<()> {
+        self.inner.set_title(title)
+    }
+
     /// Sends a terminal query on the render output side band and returns a
     /// future for its response.
     ///

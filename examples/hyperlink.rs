@@ -4,7 +4,7 @@
 //! Windows Terminal) — try Cmd+click or Ctrl+click. Unsupported terminals
 //! display the text normally.
 //!
-//! The terminal tab/window title is also set via OSC 0.
+//! The terminal tab/window title is also set via `use_terminal_title` (OSC 0).
 //! Press Esc to quit.
 
 use iocraft::prelude::*;
@@ -14,7 +14,7 @@ fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut system = hooks.use_context_mut::<SystemContext>();
     let mut should_exit = hooks.use_state(|| false);
 
-    system.set_terminal_title("iocraft hyperlink demo");
+    hooks.use_terminal_title("iocraft hyperlink demo");
 
     hooks.use_terminal_events(move |e| {
         if let TerminalEvent::Key(KeyEvent {

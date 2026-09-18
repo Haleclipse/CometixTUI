@@ -36,6 +36,34 @@ pub(super) trait TerminalImpl: Write + Send {
         Ok(())
     }
 
+    /// Sets the terminal window/tab title.
+    ///
+    /// Control characters are filtered so a title cannot terminate the OSC
+    /// payload. This is the Rust counterpart to CC Ink's `useTerminalTitle`
+    /// effect body, including its Windows branch:
+    ///
+    /// - On Windows, crossterm's [`terminal::SetTitle`] emits OSC 0 when VT
+    ///   processing is available and falls back to `SetConsoleTitleW` for
+    ///   legacy conhost, replacing CC Ink's `process.title = ...`.
+    /// - Elsewhere, OSC 0 is written directly with the shared Kitty ST / BEL
+    ///   terminator policy and flushed immediately, since a title-only write
+    ///   is not followed by a frame flush when the canvas is unchanged.
+    fn set_title(&mut self, title: &str) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            let clean = crate::ansi::sanitize_terminal_title(title);
+            self.dest().execute(terminal::SetTitle(clean))?;
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            let sequence = crate::ansi::terminal_title_sequence(title);
+            let dest = self.dest();
+            dest.write_all(sequence.as_bytes())?;
+            dest.flush()
+        }
+    }
+
     /// Polls for a pending "resumed from suspension" signal (SIGCONT on unix). Used by
     /// [`Terminal::wait`] to wake the render loop so it can repair the display after the
     /// user foregrounds the process (e.g. Ctrl+Z followed by `fg`).

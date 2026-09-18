@@ -1587,10 +1587,6 @@ impl<'a> Tree<'a> {
             if let Some(flags) = self.system_context.keyboard_enhancement_flags() {
                 term.set_keyboard_enhancement_flags(flags)?;
             }
-            if let Some(title) = self.system_context.terminal_title() {
-                let _ = crate::ansi::terminal_title(term.render_output(), title);
-                let _ = term.render_output().flush();
-            }
             if let Some(request) = self.system_context.take_terminal_handoff() {
                 // Terminal ownership handoff: release modes, run the job, then
                 // reacquire and force a full repaint. The job itself decides

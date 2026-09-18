@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(terminal)* support opt-in bracketed paste events in raw mode.
 
+### Changed
+
+- *(hooks)* [**breaking**] `use_terminal_title` is now effect-driven like CC Ink's `useTerminalTitle`: the title is written only on the render pass where it changes, instead of on every render-loop iteration. Rewriting an unchanged title made Termux scroll back to the bottom whenever an idle app re-rendered. `SystemContext::set_terminal_title` has been removed; use the hook.
+- *(terminal)* the title is delivered by the terminal backend: OSC 0 with the shared Kitty ST / BEL terminator policy on Unix-likes, and crossterm's `SetTitle` on Windows so legacy conhost without VT support still receives `SetConsoleTitleW`.
+
 ## [0.9.1](https://github.com/ccbrown/iocraft/compare/iocraft-v0.9.0...iocraft-v0.9.1) - 2026-09-04
 
 ### Other

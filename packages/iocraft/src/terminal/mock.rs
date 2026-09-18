@@ -32,6 +32,8 @@ pub struct MockTerminalConfig {
     pub canvas_diff_planning: TerminalDiffPlanning,
     /// Opt-in input backend mode for render-loop tests.
     pub input_backend: TerminalInputBackend,
+    /// Receives every terminal title the mock is asked to set, in order.
+    pub(crate) title_sink: Option<mpsc::UnboundedSender<String>>,
 }
 
 impl MockTerminalConfig {
@@ -45,7 +47,16 @@ impl MockTerminalConfig {
             suspend_on_ctrl_z: false,
             canvas_diff_planning: TerminalDiffPlanning::Baseline,
             input_backend: TerminalInputBackend::Crossterm,
+            title_sink: None,
         }
+    }
+
+    /// Forwards every `set_title` call to `sink` so tests can assert on
+    /// title write frequency without a byte-level writer.
+    #[cfg(test)]
+    pub(crate) fn with_title_sink(mut self, sink: mpsc::UnboundedSender<String>) -> Self {
+        self.title_sink = Some(sink);
+        self
     }
 
     /// Sets whether this mock terminal behaves like a fullscreen/alternate-screen terminal.
@@ -101,6 +112,7 @@ impl Default for MockTerminalConfig {
             suspend_on_ctrl_z: false,
             canvas_diff_planning: TerminalDiffPlanning::Baseline,
             input_backend: TerminalInputBackend::Crossterm,
+            title_sink: None,
         }
     }
 }
@@ -191,6 +203,13 @@ impl TerminalImpl for MockTerminal {
         let changed = self.fullscreen != next;
         self.fullscreen = next;
         Ok(changed)
+    }
+
+    fn set_title(&mut self, title: &str) -> io::Result<()> {
+        if let Some(sink) = &self.config.title_sink {
+            let _ = sink.unbounded_send(title.to_string());
+        }
+        Ok(())
     }
 
     fn clear_canvas(&mut self) -> io::Result<()> {
