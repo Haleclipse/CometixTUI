@@ -1552,7 +1552,22 @@ impl Drop for StdTerminal<'_> {
             let _ = self.dest.write_all(b"\r\n");
         }
         let _ = self.dest.queue(cursor::SetCursorStyle::DefaultUserShape);
-        let _ = self.dest.execute(cursor::Show);
+        let _ = self.dest.queue(cursor::Show);
+        // CC Ink's unmount path ends with these two so side-band state set via
+        // `progress(...)` / `use_tab_status` cannot outlive the app. The
+        // progress clear is unconditional (a no-op on terminals that ignore
+        // OSC 9;4); the tab-status clear shares the hook's capability gate and
+        // multiplexer wrapping.
+        let _ = self
+            .dest
+            .write_all(crate::ansi::CLEAR_ITERM2_PROGRESS.as_bytes());
+        if crate::hooks::supports_tab_status() {
+            let clear = crate::ansi::wrap_for_current_multiplexer_sequence(
+                &crate::ansi::clear_tab_status_sequence(),
+            );
+            let _ = self.dest.write_all(clear.as_bytes());
+        }
+        let _ = self.dest.flush();
         unregister_terminal_for_panic_restore(self.fullscreen);
     }
 }

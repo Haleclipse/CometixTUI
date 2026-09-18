@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(hooks)* `use_terminal_title` and `use_tab_status` now write in the same update pass where their value changes. Previously the write was queued through `use_output` after that hook had already drained for the pass, so a title or tab status set on the render that also called `SystemContext::exit` was silently dropped (e.g. `examples/terminal_title.rs` never set its title).
 - *(terminal)* side-band writes (`write_control_sequence`, OSC 52 clipboard, terminal queries) are flushed immediately instead of sitting in the line-buffered stdout until the next repaint. A bell, notification, or clipboard copy fired while the UI was idle previously arrived only when something else redrew.
+- *(terminal)* the exit path now ends with CC Ink's `CLEAR_ITERM2_PROGRESS` (unconditional) and, when `supports_tab_status()`, the multiplexer-wrapped `CLEAR_TAB_STATUS`, so a `Working…` progress bar or tab dot no longer outlives the app.
 
 ## [0.9.1](https://github.com/ccbrown/iocraft/compare/iocraft-v0.9.0...iocraft-v0.9.1) - 2026-09-04
 

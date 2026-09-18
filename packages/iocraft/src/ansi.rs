@@ -400,6 +400,24 @@ pub(crate) fn osc_sequence(parts: &[String]) -> String {
     format!("\x1b]{}{}", parts.join(";"), terminator)
 }
 
+/// Clears the iTerm2/ConEmu progress indicator (`OSC 9;4;0`).
+///
+/// This is CC Ink's `CLEAR_ITERM2_PROGRESS`, which the unmount path writes
+/// unconditionally on a TTY so a `Working…` bar never outlives the app. Like
+/// the original it is a fixed BEL-terminated literal rather than an
+/// [`osc_sequence`], and is not wrapped for multiplexers.
+pub(crate) const CLEAR_ITERM2_PROGRESS: &str = "\x1b]9;4;0;\x07";
+
+/// Payload that resets all three OSC 21337 tab-status fields.
+pub(crate) const CLEAR_TAB_STATUS_PAYLOAD: &str = "indicator=;status=;status-color=";
+
+/// Builds CC Ink's `CLEAR_TAB_STATUS` sequence (`OSC 21337` with every field
+/// empty). Callers wrap it for tmux/screen with
+/// [`wrap_for_current_multiplexer_sequence`], as the original does.
+pub(crate) fn clear_tab_status_sequence() -> String {
+    osc_sequence(&["21337".to_string(), CLEAR_TAB_STATUS_PAYLOAD.to_string()])
+}
+
 /// Filters OSC payload text so user-provided notification strings cannot
 /// terminate the sequence and inject terminal controls.
 pub(crate) fn sanitize_osc_payload(text: &str) -> String {

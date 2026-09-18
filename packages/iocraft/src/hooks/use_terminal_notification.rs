@@ -310,18 +310,16 @@ fn escape_tab_status_text(text: &str) -> String {
 }
 
 fn tab_status_sequence(kind: Option<TabStatusKind>) -> String {
-    let payload = match kind {
-        Some(kind) => {
-            let preset = tab_status_preset(kind);
-            format!(
-                "indicator={};status={};status-color={}",
-                hex_color(preset.indicator),
-                escape_tab_status_text(preset.status),
-                hex_color(preset.status_color)
-            )
-        }
-        None => "indicator=;status=;status-color=".to_string(),
+    let Some(kind) = kind else {
+        return ansi::clear_tab_status_sequence();
     };
+    let preset = tab_status_preset(kind);
+    let payload = format!(
+        "indicator={};status={};status-color={}",
+        hex_color(preset.indicator),
+        escape_tab_status_text(preset.status),
+        hex_color(preset.status_color)
+    );
     ansi::osc_sequence(&["21337".to_string(), payload])
 }
 

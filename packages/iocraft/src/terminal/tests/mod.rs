@@ -130,6 +130,42 @@ fn test_terminal_side_band_writes_flush_immediately() {
     );
 }
 
+#[test]
+fn test_terminal_drop_clears_progress_after_showing_cursor() {
+    // CC Ink's unmount path ends with SHOW_CURSOR, CLEAR_ITERM2_PROGRESS and
+    // (when supported) CLEAR_TAB_STATUS, so a `Working…` bar or tab dot set
+    // by the app never outlives it.
+    let stdout = TestWriter::default();
+    let terminal = Terminal::new(
+        Box::new(stdout.clone()),
+        Box::new(TestWriter::default()),
+        Output::Stdout,
+        false,
+        false,
+    )
+    .unwrap();
+    stdout.buf.lock().unwrap().clear();
+    drop(terminal);
+
+    let output = String::from_utf8(stdout.buf.lock().unwrap().clone()).unwrap();
+    let show_cursor = output
+        .find("\x1b[?25h")
+        .unwrap_or_else(|| panic!("exit must show the cursor: {output:?}"));
+    let clear_progress = output
+        .find(crate::ansi::CLEAR_ITERM2_PROGRESS)
+        .unwrap_or_else(|| panic!("exit must clear OSC 9;4 progress: {output:?}"));
+    assert!(
+        show_cursor < clear_progress,
+        "progress clear follows cursor restore like CC Ink: {output:?}"
+    );
+    if !crate::hooks::supports_tab_status() {
+        assert!(
+            !output.contains("21337"),
+            "tab-status clear stays behind its capability gate: {output:?}"
+        );
+    }
+}
+
 fn selection_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
     KeyEvent {
         code,
