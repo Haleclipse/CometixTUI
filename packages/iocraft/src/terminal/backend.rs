@@ -70,8 +70,15 @@ pub(super) trait TerminalImpl: Write + Send {
     /// (`writeRaw`): OSC notifications, progress, tab status, BEL, and terminal
     /// queries. It bypasses synchronized-update framing and the retained
     /// canvas.
+    ///
+    /// The write is flushed immediately. CC's `stdout.write` is synchronous on
+    /// a TTY, whereas Rust's `Stdout` is line-buffered and would otherwise hold
+    /// a newline-free OSC/BEL until the next repaint happens to flush it, so a
+    /// bell or clipboard copy fired while the UI is idle would arrive late.
     fn write_control_sequence(&mut self, sequence: &str) -> io::Result<()> {
-        self.dest().write_all(sequence.as_bytes())
+        let dest = self.dest();
+        dest.write_all(sequence.as_bytes())?;
+        dest.flush()
     }
 
     /// Polls for a pending "resumed from suspension" signal (SIGCONT on unix). Used by

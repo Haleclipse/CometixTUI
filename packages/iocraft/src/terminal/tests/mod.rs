@@ -70,6 +70,66 @@ fn test_terminal_control_sequence_writes_raw_without_sync_update() {
     );
 }
 
+/// Records how many times the writer was flushed, so tests can tell "bytes
+/// handed to the buffer" apart from "bytes pushed to the terminal".
+#[derive(Clone, Default)]
+struct FlushCountingWriter {
+    buf: Arc<Mutex<Vec<u8>>>,
+    flushes: Arc<AtomicUsize>,
+}
+
+impl Write for FlushCountingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.buf.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.flushes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[test]
+fn test_terminal_side_band_writes_flush_immediately() {
+    // CC Ink's `writeRaw` is `stdout.write`, synchronous on a TTY. Rust's
+    // `Stdout` is line-buffered, so without an explicit flush a newline-free
+    // OSC/BEL would sit in the buffer until the next repaint.
+    let stdout = FlushCountingWriter::default();
+    let mut terminal = Terminal::new(
+        Box::new(stdout.clone()),
+        Box::new(TestWriter::default()),
+        Output::Stdout,
+        false,
+        false,
+    )
+    .unwrap();
+    let baseline = stdout.flushes.load(Ordering::SeqCst);
+
+    terminal.write_control_sequence("\x07").unwrap();
+    assert_eq!(
+        stdout.flushes.load(Ordering::SeqCst),
+        baseline + 1,
+        "control sequences must flush at once"
+    );
+
+    terminal.set_clipboard("copy").unwrap();
+    assert_eq!(
+        stdout.flushes.load(Ordering::SeqCst),
+        baseline + 2,
+        "OSC 52 clipboard writes must flush at once"
+    );
+
+    terminal
+        .set_clipboard_with_multiplexer("copy", ClipboardMultiplexer::Tmux)
+        .unwrap();
+    assert_eq!(
+        stdout.flushes.load(Ordering::SeqCst),
+        baseline + 3,
+        "wrapped OSC 52 clipboard writes must flush at once"
+    );
+}
+
 fn selection_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
     KeyEvent {
         code,

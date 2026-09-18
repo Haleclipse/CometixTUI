@@ -489,8 +489,13 @@ impl<'a> Terminal<'a> {
     /// clipboard escape sequence directly to stdout after extracting selected
     /// text. Clipboard transport fallbacks such as tmux buffers or native tools
     /// remain application-level policy.
+    ///
+    /// Like [`Self::write_control_sequence`], the bytes are flushed at once so
+    /// the copy lands even when no repaint follows.
     pub fn set_clipboard(&mut self, text: &str) -> io::Result<()> {
-        crate::ansi::osc52_clipboard(self.inner.dest(), text)
+        let dest = self.inner.dest();
+        crate::ansi::osc52_clipboard(dest, text)?;
+        dest.flush()
     }
 
     /// Writes an OSC 52 clipboard sequence using an explicit multiplexer
@@ -504,11 +509,9 @@ impl<'a> Terminal<'a> {
         if multiplexer == ClipboardMultiplexer::None {
             self.set_clipboard(text)
         } else {
-            crate::ansi::osc52_clipboard_for_multiplexer(
-                self.inner.dest(),
-                text,
-                multiplexer.into(),
-            )
+            let dest = self.inner.dest();
+            crate::ansi::osc52_clipboard_for_multiplexer(dest, text, multiplexer.into())?;
+            dest.flush()
         }
     }
 
