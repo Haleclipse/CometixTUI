@@ -64,6 +64,16 @@ pub(super) trait TerminalImpl: Write + Send {
         }
     }
 
+    /// Writes a raw non-visual control sequence to the render output.
+    ///
+    /// This is the side channel behind CC Ink's `TerminalWriteProvider`
+    /// (`writeRaw`): OSC notifications, progress, tab status, BEL, and terminal
+    /// queries. It bypasses synchronized-update framing and the retained
+    /// canvas.
+    fn write_control_sequence(&mut self, sequence: &str) -> io::Result<()> {
+        self.dest().write_all(sequence.as_bytes())
+    }
+
     /// Polls for a pending "resumed from suspension" signal (SIGCONT on unix). Used by
     /// [`Terminal::wait`] to wake the render loop so it can repair the display after the
     /// user foregrounds the process (e.g. Ctrl+Z followed by `fg`).

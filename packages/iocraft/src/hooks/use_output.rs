@@ -76,7 +76,6 @@ enum Message {
     StdoutClipboard(String, ClipboardMultiplexer),
     StdoutControl(String),
     StdoutControlAcknowledged(String, oneshot::Sender<io::Result<()>>),
-    TerminalTitle(String),
     Stderr(String),
     StderrNoNewline(String),
 }
@@ -88,7 +87,6 @@ impl Message {
             Message::StdoutClipboard(..)
                 | Message::StdoutControl(_)
                 | Message::StdoutControlAcknowledged(..)
-                | Message::TerminalTitle(_)
         )
     }
 }
@@ -262,9 +260,6 @@ impl UseOutputState {
                     let result = terminal.write_control_sequence(&sequence);
                     let _ = sender.send(result);
                 }
-                Message::TerminalTitle(title) => {
-                    let _ = terminal.set_title(&title);
-                }
                 Message::Stderr(msg) => {
                     let mut formatted = normalize_terminal_newlines(&msg).into_owned();
                     formatted.push_str("\r\n");
@@ -403,22 +398,6 @@ impl StdoutHandle {
         }
         let mut state = self.state.lock().unwrap();
         state.queue.push(Message::StdoutControl(sequence));
-        if let Some(waker) = state.waker.take() {
-            waker.wake();
-        }
-    }
-
-    /// Queues a terminal title update.
-    ///
-    /// This is the transport behind
-    /// [`UseTerminalTitle`](crate::hooks::UseTerminalTitle); it stays crate-private
-    /// so the declarative hook remains the single public entry point, matching
-    /// CC Ink. Like [`StdoutHandle::write_control_sequence`], it is non-visual
-    /// output and does not touch the retained render canvas. The terminal decides
-    /// the delivery mechanism (OSC 0, or `SetConsoleTitleW` on legacy Windows).
-    pub(crate) fn set_terminal_title<S: Into<String>>(&self, title: S) {
-        let mut state = self.state.lock().unwrap();
-        state.queue.push(Message::TerminalTitle(title.into()));
         if let Some(waker) = state.waker.take() {
             waker.wake();
         }

@@ -518,7 +518,7 @@ impl<'a> Terminal<'a> {
     /// canvas clearing, matching CC Ink's TerminalWriteProvider side channel for
     /// OSC notifications, terminal progress, and BEL-like controls.
     pub fn write_control_sequence(&mut self, sequence: &str) -> io::Result<()> {
-        self.inner.dest().write_all(sequence.as_bytes())
+        self.inner.write_control_sequence(sequence)
     }
 
     /// Sets the terminal window/tab title.

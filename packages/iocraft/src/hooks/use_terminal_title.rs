@@ -1,6 +1,4 @@
-use crate::{strip_ansi::strip_ansi, Hooks};
-
-use super::{UseEffect, UseOutput};
+use crate::{strip_ansi::strip_ansi, ComponentUpdater, Hook, Hooks};
 
 mod private {
     pub trait Sealed {}
@@ -17,6 +15,11 @@ mod private {
 /// the render pass where it changes. Re-rendering with an unchanged title
 /// emits nothing, which matters on terminals such as Termux that treat any
 /// incoming bytes as a reason to scroll back to the bottom.
+///
+/// The write happens synchronously in the same update pass, so a component
+/// that sets a title and calls [`SystemContext::exit`](crate::SystemContext::exit)
+/// in its first render still delivers the title before the loop exits, just as
+/// React flushes passive effects before Ink unmounts.
 ///
 /// Delivery is decided by the terminal backend: OSC 0 on Unix-likes, and
 /// crossterm's `SetTitle` on Windows so legacy conhost without VT support
@@ -48,20 +51,38 @@ impl UseTerminalTitle for Hooks<'_, '_> {
         S: Into<String>,
     {
         let clean = title.map(|title| strip_ansi(&title.into()).into_owned());
-        let (stdout, _) = self.use_output();
-        // `use_effect` hashes its dependencies without storing them, so the
-        // closure owns `clean` and the dependency is a clone. `None` still
-        // participates in the hash so `Some -> None -> Some(same)` re-asserts
-        // the title, matching React's dependency comparison.
-        let deps = clean.clone();
-        self.use_effect(
-            move || {
-                if let Some(title) = clean {
-                    stdout.set_terminal_title(title);
-                }
-            },
-            deps,
-        );
+        let hook = self.use_hook(UseTerminalTitleImpl::default);
+        // Same comparison React makes on `[title]`: `None` participates, so
+        // `Some(a) -> None -> Some(a)` re-asserts the title, while an unchanged
+        // value schedules nothing.
+        if hook.last_title != clean {
+            hook.pending = clean.clone();
+            hook.last_title = clean;
+        }
+    }
+}
+
+#[derive(Default)]
+struct UseTerminalTitleImpl {
+    /// The dependency as of the last render (`None` on the very first render,
+    /// matching an initial `null` title in the original).
+    last_title: Option<String>,
+    /// Title to deliver after this update pass, if the dependency changed to
+    /// `Some`.
+    pending: Option<String>,
+}
+
+impl Hook for UseTerminalTitleImpl {
+    fn post_component_update(&mut self, updater: &mut ComponentUpdater) {
+        let Some(title) = self.pending.take() else {
+            return;
+        };
+        // Without a terminal (e.g. rendering to a string) the original's
+        // `writeRaw` is a no-op as well; the dependency is still recorded so
+        // nothing is retried later.
+        if let Some(terminal) = updater.terminal_mut() {
+            let _ = terminal.set_title(&title);
+        }
     }
 }
 
@@ -78,8 +99,7 @@ mod tests {
 
     /// Drives one render per key press. The title for each render comes from
     /// `script`, so a test can stage "unchanged", "changed", and `None` phases.
-    /// One extra settle render past the script (title `None`) exits, so the
-    /// queued write from the final scripted step is flushed before exit.
+    /// The render that runs off the end of the script exits.
     #[component]
     fn TitleScript(mut hooks: Hooks, props: &TitleScriptProps) -> impl Into<AnyElement<'static>> {
         let mut system = hooks.use_context_mut::<SystemContext>();
@@ -172,6 +192,32 @@ mod tests {
         assert!(run_script(vec![None, None]).is_empty());
     }
 
+    /// Sets a title and exits in the very same (first) render, like
+    /// `examples/terminal_title.rs`.
+    #[component]
+    fn TitleThenExit(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        hooks.use_terminal_title("\x1b[32mFinal\x1b[0m");
+        system.exit();
+        element!(Text(content: "bye"))
+    }
+
+    #[test]
+    fn test_use_terminal_title_is_delivered_when_exiting_in_same_render() {
+        // The title must not be lost just because the loop exits right after
+        // this pass; the original flushes passive effects before unmounting.
+        let titles = smol::block_on(async {
+            let (title_tx, title_rx) = mpsc::unbounded();
+            let mut app = element!(TitleThenExit);
+            let mut frames = app
+                .mock_terminal_render_loop(MockTerminalConfig::default().with_title_sink(title_tx));
+            while frames.next().await.is_some() {}
+            drop(frames);
+            title_rx.collect::<Vec<_>>().await
+        });
+        assert_eq!(titles, vec!["Final".to_string()]);
+    }
+
     #[component]
     fn TitleProbe(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         hooks.use_terminal_title("\x1b[31mClean\x1b[0m Title");
@@ -181,7 +227,7 @@ mod tests {
 
     #[test]
     fn test_use_terminal_title_renders_without_terminal() {
-        // Without a terminal the title stays queued; rendering must not panic
+        // Without a terminal the write is a no-op; rendering must not panic
         // and hook order must be stable across `Some`/`None`.
         assert_eq!(element!(TitleProbe).to_string(), "rendered\n");
     }

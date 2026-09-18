@@ -34,6 +34,8 @@ pub struct MockTerminalConfig {
     pub input_backend: TerminalInputBackend,
     /// Receives every terminal title the mock is asked to set, in order.
     pub(crate) title_sink: Option<mpsc::UnboundedSender<String>>,
+    /// Receives every raw control sequence written on the side band, in order.
+    pub(crate) control_sink: Option<mpsc::UnboundedSender<String>>,
 }
 
 impl MockTerminalConfig {
@@ -48,6 +50,7 @@ impl MockTerminalConfig {
             canvas_diff_planning: TerminalDiffPlanning::Baseline,
             input_backend: TerminalInputBackend::Crossterm,
             title_sink: None,
+            control_sink: None,
         }
     }
 
@@ -56,6 +59,14 @@ impl MockTerminalConfig {
     #[cfg(test)]
     pub(crate) fn with_title_sink(mut self, sink: mpsc::UnboundedSender<String>) -> Self {
         self.title_sink = Some(sink);
+        self
+    }
+
+    /// Forwards every side-band `write_control_sequence` call to `sink` so
+    /// tests can assert on OSC/BEL emission without a byte-level writer.
+    #[cfg(test)]
+    pub(crate) fn with_control_sink(mut self, sink: mpsc::UnboundedSender<String>) -> Self {
+        self.control_sink = Some(sink);
         self
     }
 
@@ -113,6 +124,7 @@ impl Default for MockTerminalConfig {
             canvas_diff_planning: TerminalDiffPlanning::Baseline,
             input_backend: TerminalInputBackend::Crossterm,
             title_sink: None,
+            control_sink: None,
         }
     }
 }
@@ -208,6 +220,13 @@ impl TerminalImpl for MockTerminal {
     fn set_title(&mut self, title: &str) -> io::Result<()> {
         if let Some(sink) = &self.config.title_sink {
             let _ = sink.unbounded_send(title.to_string());
+        }
+        Ok(())
+    }
+
+    fn write_control_sequence(&mut self, sequence: &str) -> io::Result<()> {
+        if let Some(sink) = &self.config.control_sink {
+            let _ = sink.unbounded_send(sequence.to_string());
         }
         Ok(())
     }

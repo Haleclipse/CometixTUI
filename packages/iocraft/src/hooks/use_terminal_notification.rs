@@ -1,5 +1,5 @@
-use super::{StdoutHandle, UseEffect, UseOutput, UseRef};
-use crate::{ansi, Hooks};
+use super::{StdoutHandle, UseOutput};
+use crate::{ansi, ComponentUpdater, Hook, Hooks};
 use std::{env, io::IsTerminal};
 
 mod private {
@@ -170,6 +170,11 @@ pub trait UseTerminalNotification: private::Sealed {
     /// Passing `None` clears a previously emitted status. Like CC Ink's
     /// `useTabStatus`, emission is gated by [`supports_tab_status`] and wrapped
     /// for tmux/screen passthrough.
+    ///
+    /// The sequence is written synchronously in the update pass where `kind`
+    /// changes, so a status set on the same render that calls
+    /// [`SystemContext::exit`](crate::SystemContext::exit) is still delivered,
+    /// just as React flushes passive effects before Ink unmounts.
     fn use_tab_status(&mut self, kind: Option<TabStatusKind>);
 }
 
@@ -180,20 +185,66 @@ impl UseTerminalNotification for Hooks<'_, '_> {
     }
 
     fn use_tab_status(&mut self, kind: Option<TabStatusKind>) {
-        let terminal = self.use_terminal_notification();
-        let mut prev_kind = self.use_ref(|| None::<TabStatusKind>);
-        self.use_effect(
-            move || {
-                let previous = prev_kind.get();
-                match kind {
-                    Some(kind) => terminal.set_tab_status(kind),
-                    None if previous.is_some() => terminal.clear_tab_status(),
-                    None => {}
-                }
-                prev_kind.set(kind);
-            },
-            kind,
-        );
+        use_tab_status_gated(self, kind, supports_tab_status);
+    }
+}
+
+/// Shared body of [`UseTerminalNotification::use_tab_status`] with the
+/// capability gate injected, so tests do not depend on `USER_TYPE`.
+fn use_tab_status_gated(hooks: &mut Hooks, kind: Option<TabStatusKind>, supported: fn() -> bool) {
+    let hook = hooks.use_hook(|| UseTabStatusImpl::new(supported));
+    // Same comparison React makes on `[kind]`; the first render always counts
+    // as a change so the effect runs on mount.
+    if hook.last_kind == Some(kind) {
+        return;
+    }
+    hook.last_kind = Some(kind);
+    // Mirrors `prevKindRef`: a `Some -> None` transition clears the stale dot,
+    // while `None` on mount (or `None -> None`) emits nothing.
+    hook.pending = match kind {
+        Some(kind) => Some(Some(kind)),
+        None if hook.prev_kind.is_some() => Some(None),
+        None => None,
+    };
+    hook.prev_kind = kind;
+}
+
+struct UseTabStatusImpl {
+    supported: fn() -> bool,
+    /// `kind` as of the last render; unset until the first render.
+    last_kind: Option<Option<TabStatusKind>>,
+    /// The kind most recently requested, so `Some -> None` knows to clear.
+    prev_kind: Option<TabStatusKind>,
+    /// Write scheduled for this update pass: `Some(Some(kind))` sets a preset,
+    /// `Some(None)` emits the clear sequence.
+    pending: Option<Option<TabStatusKind>>,
+}
+
+impl UseTabStatusImpl {
+    fn new(supported: fn() -> bool) -> Self {
+        Self {
+            supported,
+            last_kind: None,
+            prev_kind: None,
+            pending: None,
+        }
+    }
+}
+
+impl Hook for UseTabStatusImpl {
+    fn post_component_update(&mut self, updater: &mut ComponentUpdater) {
+        let Some(kind) = self.pending.take() else {
+            return;
+        };
+        // CC checks `writeRaw && supportsTabStatus()` inside the effect, after
+        // `prevKindRef` has already been updated; `prev_kind` above matches.
+        if !(self.supported)() {
+            return;
+        }
+        if let Some(terminal) = updater.terminal_mut() {
+            let sequence = ansi::wrap_for_current_multiplexer_sequence(&tab_status_sequence(kind));
+            let _ = terminal.write_control_sequence(&sequence);
+        }
     }
 }
 
@@ -318,6 +369,151 @@ fn version_gte(a: (u32, u32, u32), b: (u32, u32, u32)) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prelude::*;
+    use futures::{channel::mpsc, StreamExt};
+
+    fn always() -> bool {
+        true
+    }
+
+    fn never() -> bool {
+        false
+    }
+
+    fn expected(kind: Option<TabStatusKind>) -> String {
+        ansi::wrap_for_current_multiplexer_sequence(&tab_status_sequence(kind))
+    }
+
+    #[derive(Default, Props)]
+    struct TabStatusScriptProps {
+        script: Vec<Option<TabStatusKind>>,
+        supported: bool,
+    }
+
+    /// Drives one render per key press. The kind for each render comes from
+    /// `script`; the render that runs off the end repeats the last entry (so it
+    /// must emit nothing) and exits.
+    #[component]
+    fn TabStatusScript(
+        mut hooks: Hooks,
+        props: &TabStatusScriptProps,
+    ) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut presses = hooks.use_state(|| 0usize);
+        hooks.use_terminal_events(move |event| {
+            if let TerminalEvent::Key(KeyEvent {
+                kind: KeyEventKind::Press,
+                ..
+            }) = event
+            {
+                presses += 1;
+            }
+        });
+        let step = presses.get();
+        let kind = props
+            .script
+            .get(step)
+            .or(props.script.last())
+            .copied()
+            .flatten();
+        let gate: fn() -> bool = if props.supported { always } else { never };
+        use_tab_status_gated(&mut hooks, kind, gate);
+        if step >= props.script.len() {
+            system.exit();
+        }
+        element!(Text(content: format!("step{step}")))
+    }
+
+    fn run_script(script: Vec<Option<TabStatusKind>>, supported: bool) -> Vec<String> {
+        smol::block_on(async {
+            let (control_tx, control_rx) = mpsc::unbounded();
+            let (event_tx, event_rx) = mpsc::unbounded();
+            let steps = script.len();
+            let mut app = element!(TabStatusScript(script: script, supported: supported));
+            let mut frames = app.mock_terminal_render_loop(
+                MockTerminalConfig::with_events(event_rx).with_control_sink(control_tx),
+            );
+            for step in 0..=steps {
+                if step > 0 {
+                    event_tx
+                        .unbounded_send(TerminalEvent::Key(KeyEvent::new(
+                            KeyEventKind::Press,
+                            KeyCode::Char('n'),
+                        )))
+                        .unwrap();
+                }
+                let marker = format!("step{step}");
+                while let Some(canvas) = frames.next().await {
+                    if canvas.to_string().contains(&marker) {
+                        break;
+                    }
+                }
+            }
+            while frames.next().await.is_some() {}
+            drop(frames);
+            control_rx.collect::<Vec<_>>().await
+        })
+    }
+
+    #[test]
+    fn tab_status_writes_once_per_change_and_clears_on_none() {
+        use TabStatusKind::*;
+        assert_eq!(
+            run_script(vec![Some(Busy), Some(Busy), None, None, Some(Idle)], true),
+            vec![expected(Some(Busy)), expected(None), expected(Some(Idle))]
+        );
+    }
+
+    #[test]
+    fn tab_status_none_on_mount_emits_nothing() {
+        assert!(run_script(vec![None, None], true).is_empty());
+    }
+
+    #[test]
+    fn tab_status_unsupported_terminal_emits_nothing() {
+        // Neither the preset nor the `Some -> None` clear may leak when the
+        // capability gate is closed.
+        assert!(run_script(vec![Some(TabStatusKind::Busy), None], false).is_empty());
+    }
+
+    /// Sets a status and exits in the very same (first) render.
+    #[component]
+    fn TabStatusThenExit(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        use_tab_status_gated(&mut hooks, Some(TabStatusKind::Waiting), always);
+        system.exit();
+        element!(Text(content: "bye"))
+    }
+
+    #[test]
+    fn tab_status_is_delivered_when_exiting_in_same_render() {
+        // Previously the effect enqueued into the `use_output` queue after that
+        // hook had already drained for this pass, and the loop exited before
+        // the next drain, silently dropping the write.
+        let writes = smol::block_on(async {
+            let (control_tx, control_rx) = mpsc::unbounded();
+            let mut app = element!(TabStatusThenExit);
+            let mut frames = app.mock_terminal_render_loop(
+                MockTerminalConfig::default().with_control_sink(control_tx),
+            );
+            while frames.next().await.is_some() {}
+            drop(frames);
+            control_rx.collect::<Vec<_>>().await
+        });
+        assert_eq!(writes, vec![expected(Some(TabStatusKind::Waiting))]);
+    }
+
+    #[component]
+    fn TabStatusProbe(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        use_tab_status_gated(&mut hooks, Some(TabStatusKind::Idle), always);
+        use_tab_status_gated(&mut hooks, None, always);
+        element!(Text(content: "rendered"))
+    }
+
+    #[test]
+    fn tab_status_renders_without_terminal() {
+        assert_eq!(element!(TabStatusProbe).to_string(), "rendered\n");
+    }
 
     #[test]
     fn progress_capability_matches_cc_gate() {
