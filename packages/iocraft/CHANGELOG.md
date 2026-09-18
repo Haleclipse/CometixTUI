@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(terminal)* support opt-in bracketed paste events in raw mode.
+
+## [0.9.1](https://github.com/ccbrown/iocraft/compare/iocraft-v0.9.0...iocraft-v0.9.1) - 2026-09-04
+
+### Other
+
+- fix warnings and merge conflict
+
+## [0.9.0](https://github.com/ccbrown/iocraft/compare/iocraft-v0.8.5...iocraft-v0.9.0) - 2026-09-04
+
+### Added
+
+- *(iocraft)* add checkbox component ([#229](https://github.com/ccbrown/iocraft/pull/229))
+
+### Changed
+
+- *(terminal)* [**breaking**] add TerminalBackend trait, decouple from crossterm ([#210](https://github.com/ccbrown/iocraft/pull/210))
+- `Color`, `KeyCode`, `KeyModifiers`, `KeyEventKind`, `MouseEventKind`, and `MouseButton` are now iocraft-owned types (in `crate::color`/`crate::event`) re-exported from the crate root, rather than re-exports of the crossterm types. `From` conversions to/from the crossterm equivalents are provided when the `crossterm` feature is enabled. Code that fed these directly into crossterm APIs now needs an explicit `.into()`.
+- `ElementExt::write_to_raw_fd` has been renamed to `write_to_fd` and now takes `F: AsFd` instead of `F: AsRawFd`.
+
+### Removed
+
+- `KeyEventState` is no longer re-exported. iocraft's `KeyEvent` never carried a `state` field, so the type was unused; import it from `crossterm` directly if needed.
+
+## [0.8.5](https://github.com/ccbrown/iocraft/compare/iocraft-v0.8.4...iocraft-v0.8.5) - 2026-08-13
+
+### Added
+
+- add auto_grow prop to TextInput for content-driven height ([#225](https://github.com/ccbrown/iocraft/pull/225))
+- *(iocraft)* support OSC 8 hyperlinks in the canvas ([#216](https://github.com/ccbrown/iocraft/pull/216))
+
+### Fixed
+
+- check should_exit after select in terminal_render_loop ([#226](https://github.com/ccbrown/iocraft/pull/226))
+- set max width to enable full width layout ([#223](https://github.com/ccbrown/iocraft/pull/223))
+- don't consider empty rows equal to non-existent rows ([#222](https://github.com/ccbrown/iocraft/pull/222))
+- *(scroll-view)* preserve auto-scroll state on no-op input ([#220](https://github.com/ccbrown/iocraft/pull/220))
+- propagate terminal input errors ([#218](https://github.com/ccbrown/iocraft/pull/218))
+- *(iocraft)* correct CSI final byte class and strip DCS/APC/PM sequences ([#214](https://github.com/ccbrown/iocraft/pull/214))
+
+### Other
+
+- Implement Hyperlinks in Text and MixedText ([#224](https://github.com/ccbrown/iocraft/pull/224))
+
 ## [0.8.4](https://github.com/ccbrown/iocraft/compare/iocraft-v0.8.3...iocraft-v0.8.4) - 2026-07-13
 
 ### Added
