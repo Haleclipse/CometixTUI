@@ -23,6 +23,15 @@ pub trait Hook: Unpin + Send {
     /// Called after the component is updated.
     fn post_component_update(&mut self, _updater: &mut ComponentUpdater) {}
 
+    /// Called once every hook on the component has finished
+    /// [`post_component_update`](Self::post_component_update) for this pass.
+    ///
+    /// Effects run in `post_component_update`, so this is the earliest point at
+    /// which side effects they produced (such as queued output) can be
+    /// delivered within the same update pass, before the component is drawn
+    /// and before the render loop checks for exit.
+    fn post_component_effects(&mut self, _updater: &mut ComponentUpdater) {}
+
     /// Called before the component is drawn.
     fn pre_component_draw(&mut self, _drawer: &mut ComponentDrawer) {}
 
@@ -65,6 +74,12 @@ impl Hook for Vec<Box<dyn AnyHook>> {
     fn post_component_update(&mut self, updater: &mut ComponentUpdater) {
         for hook in self.iter_mut() {
             hook.post_component_update(updater);
+        }
+    }
+
+    fn post_component_effects(&mut self, updater: &mut ComponentUpdater) {
+        for hook in self.iter_mut() {
+            hook.post_component_effects(updater);
         }
     }
 

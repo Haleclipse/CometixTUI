@@ -196,6 +196,7 @@ impl InstantiatedComponent {
             &mut updater,
         );
         self.hooks.post_component_update(&mut updater);
+        self.hooks.post_component_effects(&mut updater);
         self.first_update = false;
         self.has_transparent_layout = updater.has_transparent_layout();
         self.skip_child_poll = updater.should_skip_child_poll();

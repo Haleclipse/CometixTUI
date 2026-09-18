@@ -598,7 +598,12 @@ impl Hook for UseOutputImpl {
         }
     }
 
-    fn post_component_update(&mut self, updater: &mut ComponentUpdater) {
+    // Drain after every hook's `post_component_update`, so output queued by
+    // effects (`use_effect`, or hooks built on it) is written in the same pass.
+    // CC Ink's `writeRaw` is synchronous inside the effect; draining earlier
+    // left anything queued by a later hook for the next pass, and the render
+    // loop exits before that pass when the same render called `exit()`.
+    fn post_component_effects(&mut self, updater: &mut ComponentUpdater) {
         let mut state = self.state.lock().unwrap();
         state.exec(updater);
     }
@@ -623,7 +628,7 @@ impl UseOutputImpl {
 mod tests {
     use super::*;
     use crate::prelude::*;
-    use futures::task::noop_waker;
+    use futures::{task::noop_waker, StreamExt};
     use macro_rules_attribute::apply;
     use smol_macros::test;
 
@@ -667,6 +672,34 @@ mod tests {
             4
         );
         assert_eq!(advance_terminal_column(3, "\x08!", None), 3);
+    }
+
+    /// Queues side-band output from an effect and exits in the same (first)
+    /// render. `use_effect` is declared after `use_output`, so the effect runs
+    /// after that hook's `post_component_update`.
+    #[component]
+    fn EffectWritesThenExits(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let (stdout, _) = hooks.use_output();
+        hooks.use_effect(move || stdout.write_control_sequence("\x07"), ());
+        system.exit();
+        element!(Text(content: "bye"))
+    }
+
+    #[apply(test!)]
+    async fn output_queued_by_effect_is_written_before_exit() {
+        // CC Ink's `writeRaw` inside `useEffect` is synchronous, so a bell (or
+        // any output) from the final commit reaches the terminal. Draining only
+        // in `post_component_update` dropped it: the loop exited before the
+        // next pass that would have flushed the queue.
+        let (control_tx, control_rx) = futures::channel::mpsc::unbounded();
+        let mut app = element!(EffectWritesThenExits);
+        let mut frames = app
+            .mock_terminal_render_loop(MockTerminalConfig::default().with_control_sink(control_tx));
+        while frames.next().await.is_some() {}
+        drop(frames);
+        let writes: Vec<String> = control_rx.collect().await;
+        assert_eq!(writes, vec!["\x07".to_string()]);
     }
 
     #[test]

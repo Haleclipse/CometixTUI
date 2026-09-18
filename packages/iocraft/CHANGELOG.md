@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(hooks)* [**breaking**] `use_terminal_title` is now effect-driven like CC Ink's `useTerminalTitle`: the title is written only on the render pass where it changes, instead of on every render-loop iteration. Rewriting an unchanged title made Termux scroll back to the bottom whenever an idle app re-rendered. `SystemContext::set_terminal_title` has been removed; use the hook.
 - *(terminal)* the title is delivered by the terminal backend: OSC 0 with the shared Kitty ST / BEL terminator policy on Unix-likes, and crossterm's `SetTitle` on Windows so legacy conhost without VT support still receives `SetConsoleTitleW`.
+- *(hooks)* `Hook` gained `post_component_effects`, called once every hook on a component has run `post_component_update`. `use_output` drains its queue there, so output queued from `use_effect` (or hooks built on it) is written in the same update pass, matching CC Ink's synchronous `writeRaw` inside `useEffect`.
 
 ### Fixed
 
