@@ -151,8 +151,18 @@ fn supports_color_base(
         return min;
     }
 
-    // The Windows OS-build probe is intentionally simplified: modern Windows
-    // 10/11 consoles all pass the 14931 truecolor threshold chalk checks for.
+    // supports-color's win32 branch (index.js:100-111) reads os.release() and
+    // grades the build: >= 14931 truecolor, >= 10586 256 colors, else 1. Every
+    // path of it returns, so the CI / TEAMCITY / COLORTERM / TERM checks below
+    // are unreachable on Windows upstream as well — the short circuit here is
+    // faithful, not an omission.
+    //
+    // The grading itself is collapsed to the top tier on purpose. Reading a
+    // real build number needs RtlGetVersion (GetVersionEx misreports on 8.1+),
+    // which would put a windows-sys dependency into an otherwise dependency
+    // free crate, and every tier below 14931 is a Windows 10 release from 2016
+    // or earlier. Decided 2026-09-21 to serve 14931+ only — where Windows
+    // Terminal and pwsh 7 live. Revisit only if that audience changes.
     #[cfg(windows)]
     {
         return 3;
@@ -236,6 +246,12 @@ fn supports_color_base(
 
 /// Maps to supports-color's TeamCity regex `^(9\.(0*[1-9]\d*)\.|\d{2,}\.)`:
 /// true for 9.x (x >= 1) and any two-or-more digit major version.
+///
+/// Gated to match its only call site. Upstream reaches the TEAMCITY_VERSION
+/// check only after the win32 branch has already returned, so on Windows this
+/// helper has no caller by construction; without the gate the target builds
+/// clean everywhere except Windows, where it warns as dead code.
+#[cfg(not(windows))]
 fn teamcity_supports_color(version: &str) -> bool {
     let mut parts = version.split('.');
     let Some(major) = parts.next() else {
