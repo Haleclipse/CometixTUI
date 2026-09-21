@@ -115,19 +115,29 @@ where
             self.delay = Some(Box::pin(Delay::new(interval)));
         }
 
-        let ready = self
-            .delay
-            .as_mut()
-            .is_some_and(|delay| delay.as_mut().poll(cx).is_ready());
-        if !ready {
-            return Poll::Pending;
-        }
+        // A tick is not a visual change: run the callback, re-arm, and stay
+        // Pending. Anything the callback wants on screen goes through a state
+        // hook, whose own poll_change reports the render — matching React/Ink,
+        // where a setInterval callback does not render and only setState does.
+        // Returning Ready here instead forced a full render per tick, which on
+        // a large canvas burned ~30% CPU at idle from no-op polls alone.
+        //
+        // The loop re-polls the fresh Delay so it registers its waker with
+        // `cx`; without that the interval would never fire again.
+        loop {
+            let ready = self
+                .delay
+                .as_mut()
+                .is_some_and(|delay| delay.as_mut().poll(cx).is_ready());
+            if !ready {
+                return Poll::Pending;
+            }
 
-        self.delay = Some(Box::pin(Delay::new(interval)));
-        if let Some(callback) = self.callback.as_mut() {
-            callback();
+            self.delay = Some(Box::pin(Delay::new(interval)));
+            if let Some(callback) = self.callback.as_mut() {
+                callback();
+            }
         }
-        Poll::Ready(())
     }
 }
 
