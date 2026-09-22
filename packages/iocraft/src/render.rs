@@ -84,6 +84,10 @@ pub struct RenderFramePhases {
     pub canvas_width: usize,
     /// Height of the rendered canvas in terminal rows.
     pub canvas_height: usize,
+    /// Number of leaf measure-function invocations during layout — the
+    /// counterpart of CC ink's per-frame `yogaMeasured` counter. A jump here
+    /// on an otherwise idle frame means Taffy's measure cache missed.
+    pub layout_measures: usize,
 }
 
 /// Accumulator for [`RenderFrameProfile`] events.
@@ -264,6 +268,7 @@ struct RenderPhaseProfile {
     update: Duration,
     layout: Duration,
     draw: Duration,
+    layout_measures: usize,
 }
 
 mod absolute_descendants;
@@ -1379,6 +1384,7 @@ impl<'a> Tree<'a> {
         };
         let update_duration = update_start.map_or(Duration::ZERO, |start| start.elapsed());
         let layout_start = profile_enabled.then(std::time::Instant::now);
+        let measure_invocations = std::cell::Cell::new(0usize);
         let alternate_screen_changed = terminal
             .as_deref_mut()
             .map(|term| {
@@ -1442,6 +1448,12 @@ impl<'a> Tree<'a> {
                 // and returns LayoutOutput; compute_leaf_layout preserves the
                 // old leaf-measurement behavior around our Size-based funcs.
                 |inputs, _node_id, node_context, style| {
+                    if node_context
+                        .as_ref()
+                        .is_some_and(|cx| cx.measure_func.is_some())
+                    {
+                        measure_invocations.set(measure_invocations.get() + 1);
+                    }
                     taffy::compute_leaf_layout(
                         inputs,
                         style,
@@ -1534,6 +1546,7 @@ impl<'a> Tree<'a> {
                 update: update_duration,
                 layout: layout_duration,
                 draw: draw_duration,
+                layout_measures: measure_invocations.get(),
             },
         }
     }
@@ -1710,6 +1723,7 @@ impl<'a> Tree<'a> {
                 frame_phases.update = output.phase_profile.update;
                 frame_phases.layout = output.phase_profile.layout;
                 frame_phases.draw = output.phase_profile.draw;
+                frame_phases.layout_measures = output.phase_profile.layout_measures;
                 frame_phases.diff_rows_scanned = diff_rows_scanned;
                 frame_phases.changed_cells = changed_cells;
                 frame_phases.canvas_width = output.canvas.width();
