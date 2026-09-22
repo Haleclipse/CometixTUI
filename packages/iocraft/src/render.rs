@@ -292,6 +292,7 @@ pub struct ComponentUpdater<'a, 'b: 'a, 'c: 'a, 'w> {
     node_id: NodeId,
     transparent_layout: bool,
     skip_child_poll: bool,
+    retained_children: bool,
     children: &'a mut Components,
     unattached_child_node_ids: &'a mut Vec<NodeId>,
     context: &'a mut UpdateContext<'b, 'w>,
@@ -310,6 +311,7 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
             node_id,
             transparent_layout: false,
             skip_child_poll: false,
+            retained_children: false,
             children,
             unattached_child_node_ids,
             context,
@@ -512,6 +514,15 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
         self.skip_child_poll
     }
 
+    /// Whether this update retained its children without re-entering them
+    /// (memo comparator matched and no retained child signaled a change).
+    /// The draw phase uses this as the safety invariant for the retained-blit
+    /// fast path: a retained subtree's output is cell-identical to the
+    /// previous frame.
+    pub(crate) fn did_retain_children(&self) -> bool {
+        self.retained_children
+    }
+
     /// Sets whether retained children should be polled while this component is idle.
     ///
     /// This is an explicit opt-in escape hatch for wrappers that intentionally
@@ -535,6 +546,7 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
     /// Memo-like transparent wrappers use this to keep retained child layout
     /// nodes attached to the parent layout tree when their comparator bails.
     pub fn retain_children(&mut self) {
+        self.retained_children = true;
         let mut child_node_ids = Vec::new();
         for component in self.children.components.iter() {
             component.append_retained_layout_node_ids(&mut child_node_ids);
@@ -633,6 +645,50 @@ struct DrawContext<'a> {
     layout_engine: &'a LayoutEngine,
     canvas: &'a mut Canvas,
     deferred_no_select: &'a mut Vec<DeferredNoSelectRegion>,
+    /// Previous frame's committed canvas, when trustworthy (None after
+    /// clear-terminal, resize, resume, or on the first frame). Enables the
+    /// retained-blit fast path for memo-retained subtrees.
+    prev_canvas: Option<&'a Canvas>,
+}
+
+/// Opt-in gate for the retained-blit draw fast path (B3-α). Off by default:
+/// the CC-parity mechanism (memo-retained subtree ⇒ cell-identical output ⇒
+/// blit from the previous canvas instead of re-drawing) is being validated
+/// A/B against the baseline full-traversal draw.
+fn retained_blit_enabled() -> bool {
+    #[cfg(test)]
+    {
+        match RETAINED_BLIT_TEST_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => return false,
+            2 => return true,
+            _ => {}
+        }
+    }
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("IOCRAFT_RETAINED_BLIT")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+/// 0 = no override, 1 = forced off, 2 = forced on. Tests cannot rely on the
+/// process-wide OnceLock: whichever parallel test touches the gate first
+/// would freeze it for the rest.
+#[cfg(test)]
+static RETAINED_BLIT_TEST_OVERRIDE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(test)]
+pub(crate) fn set_retained_blit_for_tests(enabled: Option<bool>) {
+    RETAINED_BLIT_TEST_OVERRIDE.store(
+        match enabled {
+            None => 0,
+            Some(false) => 1,
+            Some(true) => 2,
+        },
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// Provides information and operations that low level component implementations may need to
@@ -648,6 +704,97 @@ pub struct ComponentDrawer<'a> {
 }
 
 impl ComponentDrawer<'_> {
+    /// Union of the absolute canvas rectangles of `node_ids`, which must all
+    /// be laid out as children of the current node (the transparent-wrapper
+    /// case: a memo's retained layout nodes are exposed to — and positioned
+    /// relative to — the wrapper's parent). Returns None when the union is
+    /// empty or degenerate, or when any node's position resolves negative
+    /// (clamped overlays cannot be blitted from cached coordinates).
+    pub(crate) fn union_layout_rect(
+        &self,
+        node_ids: &[NodeId],
+    ) -> Option<(usize, usize, usize, usize)> {
+        let mut left = i32::MAX;
+        let mut top = i32::MAX;
+        let mut right = i32::MIN;
+        let mut bottom = i32::MIN;
+        for id in node_ids {
+            let layout = self.context.layout_engine.layout(*id).ok()?;
+            if layout.size.width <= 0.0 || layout.size.height <= 0.0 {
+                continue;
+            }
+            let x = self.node_position.x as i32 + layout.location.x as i32;
+            let y = self.node_position.y as i32 + layout.location.y as i32;
+            left = left.min(x);
+            top = top.min(y);
+            right = right.max(x + layout.size.width as i32);
+            bottom = bottom.max(y + layout.size.height as i32);
+        }
+        if left == i32::MAX || left < 0 || top < 0 || right <= left || bottom <= top {
+            return None;
+        }
+        Some((
+            left as usize,
+            top as usize,
+            (right - left) as usize,
+            (bottom - top) as usize,
+        ))
+    }
+
+    /// Retained-blit fast path: copy this node's rectangle from the previous
+    /// frame's canvas instead of re-drawing the subtree.
+    ///
+    /// The caller guarantees the subtree's output is cell-identical to the
+    /// previous frame (memo comparator matched AND no retained child signaled
+    /// a change — the same invariant CC Ink's clean-node blit relies on, where
+    /// `!node.dirty` + unchanged layout short-circuits to
+    /// `output.blit(prevScreen, ...)` in render-node-to-output.ts:452-480).
+    /// This method owns the remaining safety guards:
+    /// * gate is on, a trustworthy previous canvas exists;
+    /// * the rectangle is fully inside both canvases (a clipped or shifted
+    ///   node falls back to a normal draw);
+    /// * the previous frame's cursor declaration is not inside the rectangle
+    ///   (a blitted subtree runs no draw hooks, so it could not re-declare it).
+    pub(crate) fn try_retained_blit(&mut self, rect: (usize, usize, usize, usize)) -> bool {
+        if !retained_blit_enabled() {
+            return false;
+        }
+        let Some(prev) = self.context.prev_canvas else {
+            return false;
+        };
+        let (x, y, width, height) = rect;
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let dst = &self.context.canvas;
+        if x + width > dst.width()
+            || y + height > dst.height()
+            || x + width > prev.width()
+            || y + height > prev.height()
+        {
+            return false;
+        }
+        // Clipped subtrees drew partially last frame; their cells cannot be
+        // assumed representative of the full subtree. Fall back.
+        if self.vertical_clip_active
+            || (x as u16) < self.clip_rect.left
+            || ((x + width) as u16) > self.clip_rect.right
+            || (y as u16) < self.clip_rect.top
+            || ((y + height) as u16) > self.clip_rect.bottom
+        {
+            return false;
+        }
+        if let Some(cursor) = prev.cursor_declaration() {
+            let cx = cursor.x as usize;
+            let cy = cursor.y as usize;
+            if cx >= x && cx < x + width && cy >= y && cy < y + height {
+                return false;
+            }
+        }
+        self.context.canvas.blit_region_from(prev, x, y, width, height);
+        true
+    }
+
     /// Gets the calculated layout of the current node.
     pub fn layout(&self) -> Layout {
         *self
@@ -1183,6 +1330,7 @@ impl<'a> Tree<'a> {
         max_width: Option<usize>,
         mut terminal: Option<&mut Terminal<'_>>,
         profile_enabled: bool,
+        prev_canvas: Option<&Canvas>,
     ) -> RenderOutput {
         self.system_context.begin_render_frame();
         let update_start = profile_enabled.then(std::time::Instant::now);
@@ -1352,6 +1500,14 @@ impl<'a> Tree<'a> {
                     layout_engine: &self.layout_engine,
                     canvas: &mut canvas,
                     deferred_no_select: &mut deferred_no_select,
+                    // Invalidated alongside the render-loop's own prev_canvas
+                    // (clear-terminal / resize / resume all pass None), so a
+                    // blit can never copy from a stale or cleared frame.
+                    prev_canvas: if invalidate_prev_frame || did_clear_terminal_output {
+                        None
+                    } else {
+                        prev_canvas
+                    },
                 },
             };
             self.root_component.draw(&mut drawer);
@@ -1449,6 +1605,11 @@ impl<'a> Tree<'a> {
                     terminal_size.map(|(w, _)| w as usize),
                     Some(&mut term),
                     profile_enabled,
+                    if terminal_size_changed {
+                        None
+                    } else {
+                        prev_canvas.as_ref()
+                    },
                 );
                 let terminal_diff_planning = term.canvas_diff_planning();
                 let (should_repaint, repaint_reason, changed_cells, diff_rows_scanned) =
@@ -1869,7 +2030,7 @@ fn debug_repaint_reason_from_terminal_plan(
 pub(crate) fn render<E: ElementExt>(mut e: E, max_width: Option<usize>) -> Canvas {
     let h = e.helper();
     let mut tree = Tree::new(e.props_mut(), h);
-    tree.render(max_width, None, false).canvas
+    tree.render(max_width, None, false, None).canvas
 }
 
 pub(crate) async fn terminal_render_loop<E>(

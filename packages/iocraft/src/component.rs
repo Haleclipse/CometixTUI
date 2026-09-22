@@ -142,6 +142,13 @@ pub(crate) struct InstantiatedComponent {
     // update. Memo-like wrappers reuse this list when they retain children
     // without re-entering the skipped subtree.
     exposed_child_node_ids: Vec<NodeId>,
+    // This update retained its children without re-entering them (memo
+    // comparator matched, no retained child signaled a change) — the safety
+    // invariant for the retained-blit draw fast path.
+    subtree_retained: bool,
+    // Absolute canvas rectangle this subtree drew into last frame. A blit is
+    // only attempted when the current layout resolves to the same rectangle.
+    cached_blit_bounds: Option<(usize, usize, usize, usize)>,
 }
 
 impl InstantiatedComponent {
@@ -157,6 +164,8 @@ impl InstantiatedComponent {
             skip_child_poll: false,
             pending_change: false,
             exposed_child_node_ids: Vec::new(),
+            subtree_retained: false,
+            cached_blit_bounds: None,
         }
     }
 
@@ -200,6 +209,7 @@ impl InstantiatedComponent {
         self.first_update = false;
         self.has_transparent_layout = updater.has_transparent_layout();
         self.skip_child_poll = updater.should_skip_child_poll();
+        self.subtree_retained = updater.did_retain_children();
         self.exposed_child_node_ids = unattached_child_node_ids[exposed_start..].to_vec();
         self.pending_change = false;
     }
@@ -209,17 +219,53 @@ impl InstantiatedComponent {
             // If the component has a transparent layout, provide the first child's layout to the
             // hooks and component.
             if let Some(child) = self.children.components.iter().next().as_ref() {
-                drawer.for_child_node_layout(child.node_id, |drawer| {
+                let child_node_id = child.node_id;
+                // Retained-blit fast path: a memo-retained single-child
+                // subtree is cell-identical to the previous frame, so restore
+                // its rectangle from the previous canvas and skip the whole
+                // subtree draw — the CC ink clean-node blit
+                // (render-node-to-output.ts:452-480). The rectangle is the
+                // union of the child's retained layout nodes: transparent
+                // wrappers (memo children are usually `#[component]` functions,
+                // themselves transparent) have zero-sized nodes of their own,
+                // and the real footprint lives on the exposed descendants —
+                // all positioned relative to this drawer's current node.
+                // Guards (gate, bounds, clipping, cursor) live in
+                // `try_retained_blit`; the single-child restriction keeps the
+                // union equal to the subtree's full footprint.
+                let single_child = self.children.components.iter().nth(1).is_none();
+                let subtree_rect = if self.subtree_retained || single_child {
+                    let mut ids = Vec::new();
+                    child.append_retained_layout_node_ids(&mut ids);
+                    drawer.union_layout_rect(&ids)
+                } else {
+                    None
+                };
+                if self.subtree_retained && single_child {
+                    if let Some(rect) = subtree_rect {
+                        if self.cached_blit_bounds == Some(rect)
+                            && drawer.try_retained_blit(rect)
+                        {
+                            return;
+                        }
+                    }
+                }
+                drawer.for_child_node_layout(child_node_id, |drawer| {
                     self.hooks.pre_component_draw(drawer);
                     self.component.draw(drawer);
                 });
+                self.cached_blit_bounds = if single_child { subtree_rect } else { None };
             } else {
                 self.hooks.pre_component_draw(drawer);
                 self.component.draw(drawer);
+                self.cached_blit_bounds = None;
             }
         } else {
             self.hooks.pre_component_draw(drawer);
             self.component.draw(drawer);
+            // Only transparent memo wrappers ride the blit fast path; other
+            // components draw their own content each frame.
+            self.cached_blit_bounds = None;
         }
 
         if !drawer.take_skip_children() {

@@ -196,6 +196,72 @@ mod tests {
         );
     }
 
+    static BLIT_PROBE_DRAWS: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Default)]
+    struct DrawProbeHook;
+    impl crate::Hook for DrawProbeHook {
+        fn pre_component_draw(&mut self, _drawer: &mut crate::ComponentDrawer) {
+            BLIT_PROBE_DRAWS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[component]
+    fn DrawProbedChild(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        hooks.use_hook(DrawProbeHook::default);
+        element!(Text(content: "blit-stable"))
+    }
+
+    #[component]
+    fn BlitProbeApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut tick = hooks.use_state(|| 0u8);
+        if tick.get() < 3 {
+            tick += 1;
+        } else {
+            system.exit();
+        }
+
+        element! {
+            View(flex_direction: FlexDirection::Column) {
+                Text(content: format!("tick {}", tick.get()))
+                Memo(memo_key: "stable".to_string(), compare: memo_key_eq as MemoComparator) {
+                    DrawProbedChild
+                }
+            }
+        }
+    }
+
+    /// The retained-blit fast path must skip the entire subtree draw (hooks
+    /// included) once the memo has retained its children and the layout is
+    /// unchanged, while keeping the subtree's cells on the canvas.
+    #[test]
+    fn test_retained_blit_skips_child_draw_when_enabled() {
+        crate::render::set_retained_blit_for_tests(Some(true));
+        BLIT_PROBE_DRAWS.store(0, Ordering::SeqCst);
+        let canvases: Vec<_> = smol::block_on(
+            element!(BlitProbeApp)
+                .mock_terminal_render_loop(MockTerminalConfig::default())
+                .collect(),
+        );
+        crate::render::set_retained_blit_for_tests(None);
+        let frames = canvases.len();
+        let draws = BLIT_PROBE_DRAWS.load(Ordering::SeqCst);
+        let rendered = canvases.last().unwrap().to_string();
+        assert!(
+            rendered.contains("blit-stable"),
+            "blitted subtree must keep its cells: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("tick 3"),
+            "dynamic sibling must keep updating: {rendered:?}"
+        );
+        assert!(
+            draws < frames,
+            "retained blit should skip child draws after the first frame: draws={draws} frames={frames}"
+        );
+    }
+
     #[component]
     fn NoComparatorMemoApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let mut system = hooks.use_context_mut::<SystemContext>();
