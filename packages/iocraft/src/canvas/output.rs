@@ -272,7 +272,7 @@ impl CanvasSubviewMut<'_> {
             let src_right = src_left + copy_width;
             let dst_right = dst_left + copy_width;
 
-            self.canvas.cells[dst_row][dst_left..dst_right]
+            self.canvas.cells_row_mut(dst_row)[dst_left..dst_right]
                 .clone_from_slice(&src.cells[src_row][src_left..src_right]);
             self.canvas.overlays[dst_row][dst_left..dst_right]
                 .clone_from_slice(&src.overlays[src_row][src_left..src_right]);
@@ -296,7 +296,7 @@ impl CanvasSubviewMut<'_> {
                 && (dst_right as isize) < clip_right
                 && src.cells[src_row][src_right - 1].cell_width == CellWidth::Wide
             {
-                self.canvas.cells[dst_row][dst_right] = CanvasCell {
+                self.canvas.cells_row_mut(dst_row)[dst_right] = CanvasCell {
                     cell_width: CellWidth::WidthTail,
                     ..Default::default()
                 };

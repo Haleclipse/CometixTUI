@@ -258,7 +258,16 @@ impl CanvasCell {
 #[derive(Clone)]
 pub struct Canvas {
     pub(super) width: usize,
-    pub(super) cells: Vec<Vec<CanvasCell>>,
+    /// Rows are `Arc`-shared copy-on-write: blitting a full row from another
+    /// canvas is a pointer clone, the blank-canvas constructor shares one
+    /// blank row template, and row equality can short-circuit on pointer
+    /// identity. Mutation goes through `cells_row_mut` (`Arc::make_mut`), so
+    /// a shared row is deep-copied only when actually written. This is what
+    /// keeps per-frame canvas work O(written rows) instead of O(canvas):
+    /// CanvasCell carries heap fields (grapheme String, hyperlink), so the
+    /// previous per-cell deep clones dominated draw on multi-thousand-row
+    /// inline sessions.
+    pub(super) cells: Vec<std::sync::Arc<Vec<CanvasCell>>>,
     pub(super) overlays: Vec<Vec<Option<StyleOverlay>>>,
     pub(super) no_select: Vec<Vec<bool>>,
     pub(super) soft_wrap: Vec<usize>,
@@ -279,7 +288,14 @@ pub struct Canvas {
 impl PartialEq for Canvas {
     fn eq(&self, other: &Self) -> bool {
         self.width == other.width
-            && self.cells == other.cells
+            && self.cells.len() == other.cells.len()
+            && self
+                .cells
+                .iter()
+                .zip(&other.cells)
+                // Pointer-identical rows (shared blank template, baseline
+                // blits, canvas clones) compare equal without touching cells.
+                .all(|(a, b)| std::sync::Arc::ptr_eq(a, b) || a == b)
             && self.overlays == other.overlays
             && self.cursor_declaration == other.cursor_declaration
     }
@@ -437,9 +453,10 @@ pub struct CursorDeclaration {
 impl Canvas {
     /// Constructs a new canvas with the given dimensions.
     pub fn new(width: usize, height: usize) -> Self {
+        let blank_row = std::sync::Arc::new(vec![CanvasCell::default(); width]);
         Self {
             width,
-            cells: vec![vec![CanvasCell::default(); width]; height],
+            cells: vec![blank_row; height],
             overlays: vec![vec![None; width]; height],
             no_select: vec![vec![false; width]; height],
             soft_wrap: vec![0; height],
@@ -469,6 +486,14 @@ impl Canvas {
     /// Cross-module form of `mark_rows_written` for the subview writer.
     pub(super) fn mark_rows_written_range(&mut self, top: usize, bottom: usize) {
         self.mark_rows_written(top, bottom);
+    }
+
+    /// Mutable access to a row's cells, copy-on-write. Shared rows (blank
+    /// template, full-row blits, canvas clones) are deep-copied here, exactly
+    /// once, when first written.
+    #[inline]
+    pub(super) fn cells_row_mut(&mut self, y: usize) -> &mut Vec<CanvasCell> {
+        std::sync::Arc::make_mut(&mut self.cells[y])
     }
 
     /// Marks a rectangular region as excluded from fullscreen text selection.
@@ -1031,7 +1056,7 @@ impl Canvas {
                 && self.cells[row][x].cell_width == CellWidth::WidthTail
                 && self.cells[row][x - 1].cell_width == CellWidth::Wide
             {
-                self.cells[row][x - 1] = CanvasCell::default();
+                self.cells_row_mut(row)[x - 1] = CanvasCell::default();
                 self.overlays[row][x - 1] = None;
                 damage_min_x = damage_min_x.min(x - 1);
             }
@@ -1039,13 +1064,16 @@ impl Canvas {
                 && self.cells[row][max_x - 1].cell_width == CellWidth::Wide
                 && self.cells[row][max_x].cell_width == CellWidth::WidthTail
             {
-                self.cells[row][max_x] = CanvasCell::default();
+                self.cells_row_mut(row)[max_x] = CanvasCell::default();
                 self.overlays[row][max_x] = None;
                 damage_max_x = damage_max_x.max(max_x + 1);
             }
 
+            let cells_row = self.cells_row_mut(row);
             for col in x..max_x {
-                self.cells[row][col] = CanvasCell::default();
+                cells_row[col] = CanvasCell::default();
+            }
+            for col in x..max_x {
                 self.overlays[row][col] = None;
             }
         }
@@ -1135,8 +1163,16 @@ impl Canvas {
             return;
         }
 
+        let full_row = x == 0 && max_x >= self.width && max_x >= src.width;
         for row in y..max_y {
-            self.cells[row][x..max_x].clone_from_slice(&src.cells[row][x..max_x]);
+            if full_row {
+                // Full-width copies share the source row instead of deep-
+                // cloning cell-by-cell (CanvasCell carries heap fields); the
+                // row is copied for real only if something later writes it.
+                self.cells[row] = std::sync::Arc::clone(&src.cells[row]);
+            } else {
+                self.cells_row_mut(row)[x..max_x].clone_from_slice(&src.cells[row][x..max_x]);
+            }
             self.overlays[row][x..max_x].clone_from_slice(&src.overlays[row][x..max_x]);
             self.no_select[row][x..max_x].clone_from_slice(&src.no_select[row][x..max_x]);
             self.soft_wrap[row] = src.soft_wrap[row];
@@ -1147,7 +1183,7 @@ impl Canvas {
             let mut wrote_tail = false;
             for row in y..max_y {
                 if src.cells[row][max_x - 1].cell_width == CellWidth::Wide {
-                    self.cells[row][max_x] = CanvasCell {
+                    self.cells_row_mut(row)[max_x] = CanvasCell {
                         cell_width: CellWidth::WidthTail,
                         ..Default::default()
                     };
@@ -1236,7 +1272,7 @@ impl Canvas {
         let abs_delta = delta.unsigned_abs() as usize;
         if abs_delta >= height {
             for y in top..=bottom {
-                self.cells[y].fill(CanvasCell::default());
+                self.cells[y] = std::sync::Arc::new(vec![CanvasCell::default(); self.width]);
                 self.overlays[y].fill(None);
                 self.no_select[y].fill(false);
                 self.soft_wrap[y] = 0;
@@ -1252,7 +1288,7 @@ impl Canvas {
                 self.soft_wrap[y] = self.soft_wrap[y + abs_delta];
             }
             for y in bottom - abs_delta + 1..=bottom {
-                self.cells[y].fill(CanvasCell::default());
+                self.cells[y] = std::sync::Arc::new(vec![CanvasCell::default(); self.width]);
                 self.overlays[y].fill(None);
                 self.no_select[y].fill(false);
                 self.soft_wrap[y] = 0;
@@ -1265,7 +1301,7 @@ impl Canvas {
                 self.soft_wrap[y] = self.soft_wrap[y - abs_delta];
             }
             for y in top..top + abs_delta {
-                self.cells[y].fill(CanvasCell::default());
+                self.cells[y] = std::sync::Arc::new(vec![CanvasCell::default(); self.width]);
                 self.overlays[y].fill(None);
                 self.no_select[y].fill(false);
                 self.soft_wrap[y] = 0;
@@ -1607,7 +1643,8 @@ impl Canvas {
     pub(super) fn clear_text(&mut self, x: usize, y: usize, w: usize, h: usize) {
         self.mark_rows_written(y, y.saturating_add(h));
         for y in y..y + h {
-            if let Some(row) = self.cells.get_mut(y) {
+            if y < self.cells.len() {
+                let row = self.cells_row_mut(y);
                 for x in x..x + w {
                     if x < row.len() {
                         clear_cell_width_relationship(row, x);
@@ -1627,7 +1664,8 @@ impl Canvas {
     ) {
         self.mark_rows_written(y, y.saturating_add(h));
         for y in y..y + h {
-            if let Some(row) = self.cells.get_mut(y) {
+            if y < self.cells.len() {
+                let row = self.cells_row_mut(y);
                 for x in x..x + w {
                     if x < row.len() {
                         row[x].background_color = Some(color);
@@ -1681,7 +1719,7 @@ impl Canvas {
         hyperlink: Option<&str>,
     ) {
         self.mark_rows_written(y, y.saturating_add(1));
-        let row = &mut self.cells[y];
+        let row = std::sync::Arc::make_mut(&mut self.cells[y]);
         if row.is_empty() {
             return;
         }
