@@ -283,6 +283,7 @@ mod render_node_to_output;
 mod render_scrolled_children;
 mod renderer_state;
 mod scroll_fast_path;
+pub(crate) mod wake;
 
 pub use absolute_descendants::*;
 pub use dirty_tree::*;
@@ -305,6 +306,9 @@ pub struct ComponentUpdater<'a, 'b: 'a, 'c: 'a, 'w> {
     unattached_child_node_ids: &'a mut Vec<NodeId>,
     context: &'a mut UpdateContext<'b, 'w>,
     component_context_stack: &'a mut ContextStack<'c>,
+    // Shared route to the render loop for push-mode wake proxies; handed to
+    // every child component instantiated during this update.
+    root_wake_slot: std::sync::Arc<wake::RootWakeSlot>,
 }
 
 impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
@@ -314,6 +318,7 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
         unattached_child_node_ids: &'a mut Vec<NodeId>,
         context: &'a mut UpdateContext<'b, 'w>,
         component_context_stack: &'a mut ContextStack<'c>,
+        root_wake_slot: std::sync::Arc<wake::RootWakeSlot>,
     ) -> Self {
         Self {
             node_id,
@@ -324,6 +329,7 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
             unattached_child_node_ids,
             context,
             component_context_stack,
+            root_wake_slot,
         }
     }
 
@@ -612,7 +618,12 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
                                     .expect("we should be able to add the node");
                                 child_node_ids.push(new_node_id);
                                 let h = child.helper();
-                                InstantiatedComponent::new(new_node_id, child.props_mut(), h)
+                                InstantiatedComponent::new(
+                                    new_node_id,
+                                    child.props_mut(),
+                                    h,
+                                    std::sync::Arc::clone(&self.root_wake_slot),
+                                )
                             }
                         };
                     component.update(
@@ -1330,7 +1341,12 @@ impl<'a> Tree<'a> {
         Self {
             layout_engine,
             wrapper_node_id,
-            root_component: InstantiatedComponent::new(root_node_id, props.borrow(), helper),
+            root_component: InstantiatedComponent::new(
+                root_node_id,
+                props.borrow(),
+                helper,
+                std::sync::Arc::new(wake::RootWakeSlot::default()),
+            ),
             root_component_props: props,
             system_context: SystemContext::new(),
             root_view_event_context: crate::components::ViewFocusParentContext::shared_root(),

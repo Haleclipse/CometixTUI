@@ -4,15 +4,19 @@ use crate::{
     hook::{AnyHook, Hook, Hooks},
     multimap::RemoveOnlyMultimap,
     props::{AnyProps, Props},
-    render::{ComponentDrawer, ComponentUpdater, UpdateContext},
+    render::{
+        wake::{push_wake_enabled, ComponentWakeState, RootWakeSlot},
+        ComponentDrawer, ComponentUpdater, UpdateContext,
+    },
 };
 use core::{
     any::{Any, TypeId},
     marker::PhantomData,
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
 use futures::future::poll_fn;
+use std::sync::Arc;
 use taffy::NodeId;
 
 pub(crate) struct ComponentHelper<C: Component> {
@@ -38,6 +42,7 @@ pub trait ComponentHelperExt: Any + Send + Sync {
         updater: &mut ComponentUpdater,
     );
     fn component_type_id(&self) -> TypeId;
+    fn component_type_name(&self) -> &'static str;
     fn copy(&self) -> Box<dyn ComponentHelperExt>;
 }
 
@@ -58,6 +63,10 @@ impl<C: Component> ComponentHelperExt for ComponentHelper<C> {
 
     fn component_type_id(&self) -> TypeId {
         TypeId::of::<C>()
+    }
+
+    fn component_type_name(&self) -> &'static str {
+        core::any::type_name::<C>()
     }
 
     fn copy(&self) -> Box<dyn ComponentHelperExt> {
@@ -149,10 +158,22 @@ pub(crate) struct InstantiatedComponent {
     // Absolute canvas rectangle this subtree drew into last frame. A blit is
     // only attempted when the current layout resolves to the same rectangle.
     cached_blit_bounds: Option<(usize, usize, usize, usize)>,
+    // Push-mode wake routing (Phase W): the dirty bit any wake from this
+    // component's hooks/futures lands on, plus the shared route to the render
+    // loop. `proxy_waker` is the cached `Waker` built from it.
+    wake_state: Arc<ComponentWakeState>,
+    proxy_waker: Waker,
 }
 
 impl InstantiatedComponent {
-    pub fn new(node_id: NodeId, props: AnyProps, helper: Box<dyn ComponentHelperExt>) -> Self {
+    pub fn new(
+        node_id: NodeId,
+        props: AnyProps,
+        helper: Box<dyn ComponentHelperExt>,
+        root_wake_slot: Arc<RootWakeSlot>,
+    ) -> Self {
+        let wake_state = Arc::new(ComponentWakeState::new(root_wake_slot));
+        let proxy_waker = Waker::from(Arc::clone(&wake_state));
         Self {
             node_id,
             component: helper.new_component(props),
@@ -166,7 +187,13 @@ impl InstantiatedComponent {
             exposed_child_node_ids: Vec::new(),
             subtree_retained: false,
             cached_blit_bounds: None,
+            wake_state,
+            proxy_waker,
         }
+    }
+
+    pub(crate) fn root_wake_slot(&self) -> &Arc<RootWakeSlot> {
+        self.wake_state.root()
     }
 
     pub fn node_id(&self) -> NodeId {
@@ -196,6 +223,7 @@ impl InstantiatedComponent {
             unattached_child_node_ids,
             context,
             component_context_stack,
+            Arc::clone(self.wake_state.root()),
         );
         self.hooks.pre_component_update(&mut updater);
         self.helper.update_component(
@@ -296,17 +324,55 @@ impl InstantiatedComponent {
 
     pub async fn wait(&mut self) {
         let mut self_mut = Pin::new(self);
-        poll_fn(|cx| self_mut.as_mut().poll_change(cx)).await;
+        poll_fn(|cx| {
+            // Push mode routes every component wake through the shared root
+            // slot; keep it pointed at the loop's current waker. AtomicWaker
+            // handles the register/wake race internally.
+            if push_wake_enabled() {
+                self_mut.wake_state.root().waker.register(cx.waker());
+            }
+            self_mut.as_mut().poll_change(cx)
+        })
+        .await;
     }
 
     fn poll_change(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        let component_status = Pin::new(&mut *self.component).poll_change(cx);
+        let harvest = push_wake_enabled();
+        // Harvest scan: hooks obey the Future contract (Pending ⇒ they re-poll
+        // only after a wake), and in push mode every wake lands on this
+        // component's dirty bit. A clean component's hook wakers are still
+        // armed from the last poll, so skipping it cannot lose a change.
+        // New components start dirty, so the first poll always arms.
+        let self_dirty = if harvest {
+            self.wake_state.take_dirty()
+        } else {
+            true
+        };
+        let proxy_waker = self.proxy_waker.clone();
+        let mut proxy_cx = Context::from_waker(&proxy_waker);
+        let component_status = if self_dirty {
+            if harvest {
+                Pin::new(&mut *self.component).poll_change(&mut proxy_cx)
+            } else {
+                Pin::new(&mut *self.component).poll_change(cx)
+            }
+        } else {
+            Poll::Pending
+        };
         let children_status = if self.skip_child_poll {
             Poll::Pending
         } else {
             Pin::new(&mut self.children).poll_change(cx)
         };
-        let hooks_status = Pin::new(&mut self.hooks).poll_change(cx);
+        let hooks_status = if self_dirty {
+            if harvest {
+                Pin::new(&mut self.hooks).poll_change(&mut proxy_cx)
+            } else {
+                Pin::new(&mut self.hooks).poll_change(cx)
+            }
+        } else {
+            Poll::Pending
+        };
         if component_status.is_ready() || children_status.is_ready() || hooks_status.is_ready() {
             self.pending_change = true;
             Poll::Ready(())

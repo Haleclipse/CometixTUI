@@ -1,6 +1,6 @@
 use std::{
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
 use taffy::Rect;
 
@@ -29,6 +29,7 @@ impl<'a> UseComponentRect<'a> for Hooks<'a, '_> {
         self.use_hook(move || UseComponentRectImpl {
             rect: None,
             is_changed: false,
+            waker: None,
         })
         .rect
     }
@@ -37,13 +38,20 @@ impl<'a> UseComponentRect<'a> for Hooks<'a, '_> {
 struct UseComponentRectImpl {
     rect: Option<Rect<i32>>,
     is_changed: bool,
+    waker: Option<Waker>,
 }
 
 impl Hook for UseComponentRectImpl {
-    fn poll_change(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+    fn poll_change(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         if self.is_changed {
+            self.is_changed = false;
             Poll::Ready(())
         } else {
+            // The change is detected in the draw phase where no Context is
+            // available; stash the waker so `pre_component_draw` can wake
+            // instead of relying on an unconditional next-frame poll (which
+            // push-mode harvesting no longer performs for clean components).
+            self.waker = Some(cx.waker().clone());
             Poll::Pending
         }
     }
@@ -61,8 +69,9 @@ impl Hook for UseComponentRectImpl {
         if self.rect != Some(rect) {
             self.rect = Some(rect);
             self.is_changed = true;
-        } else {
-            self.is_changed = false;
+            if let Some(waker) = self.waker.take() {
+                waker.wake();
+            }
         }
     }
 }
