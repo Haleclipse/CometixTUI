@@ -322,6 +322,21 @@ impl InstantiatedComponent {
         }
     }
 
+    /// Settle-poll for the render-phase update loop (push mode only): consumes
+    /// any changes that fired during the update phase itself — state writes
+    /// from update bodies wake their component's proxy, so one harvest pass
+    /// both consumes the `did_change` bits and reports whether another update
+    /// round is needed. Safe only under push-wake: every hook is polled through
+    /// its component's proxy waker, so the no-op context passed here is never
+    /// stored by a hook. This is the iocraft analogue of React's render-phase
+    /// update ("setState during render re-renders before commit").
+    pub(crate) fn settle_poll(&mut self) -> bool {
+        debug_assert!(push_wake_enabled());
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        Pin::new(self).poll_change(&mut cx).is_ready()
+    }
+
     pub async fn wait(&mut self) {
         let mut self_mut = Pin::new(self);
         poll_fn(|cx| {

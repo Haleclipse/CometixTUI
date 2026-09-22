@@ -1368,44 +1368,69 @@ impl<'a> Tree<'a> {
             .map(Terminal::exit_on_ctrl_c)
             .unwrap_or(true);
         let mut wrapper_child_node_ids = vec![self.root_component.node_id()];
-        let (did_clear_terminal_output, force_full_repaint, invalidate_prev_frame) = {
-            let mut context = UpdateContext {
-                terminal: terminal.as_deref_mut(),
-                layout_engine: &mut self.layout_engine,
-                did_clear_terminal_output: false,
-                force_full_repaint: false,
-                invalidate_prev_frame: false,
+        let mut did_clear_terminal_output = false;
+        let mut force_full_repaint = false;
+        let mut invalidate_prev_frame = false;
+        // Render-phase update settling (push mode): an update body that writes
+        // a State would otherwise schedule a whole extra frame just to let the
+        // tree observe the new value — the frame renders with the stale value
+        // and a follow-up frame converges. Re-running the update in the same
+        // frame (React's render-phase update semantics) lets the frame commit
+        // the settled values directly. Capped to avoid livelock on
+        // pathological update-loops; the leftover change then simply schedules
+        // a normal frame like today.
+        let mut settle_rounds_left = if wake::push_wake_enabled() { 2 } else { 0 };
+        loop {
+            wrapper_child_node_ids.truncate(1);
+            let (did_clear, force_full, invalidate) = {
+                let mut context = UpdateContext {
+                    terminal: terminal.as_deref_mut(),
+                    layout_engine: &mut self.layout_engine,
+                    did_clear_terminal_output: false,
+                    force_full_repaint: false,
+                    invalidate_prev_frame: false,
+                };
+                let mut component_context_stack = ContextStack::root(&mut self.system_context);
+                // CC Ink dispatches hit-test/focus events from a single DOM root.
+                // Seed an equivalent root event context for the whole iocraft tree so
+                // transparent root components (Fragment, ContextProvider, etc.) share
+                // one topmost click/hover registry instead of acting like independent
+                // roots. The hovered set persists across frames like CC Ink's
+                // `hoveredNodes`, while the per-frame hit registries are rebuilt below.
+                self.root_view_event_context.begin_root_event_frame();
+                component_context_stack.with_context(
+                    Some(Context::owned(ExitOnCtrlCContext(exit_on_ctrl_c))),
+                    |component_context_stack| {
+                        component_context_stack.with_context(
+                            Some(Context::owned(self.root_view_event_context.clone())),
+                            |component_context_stack| {
+                                self.root_component.update(
+                                    &mut context,
+                                    &mut wrapper_child_node_ids,
+                                    component_context_stack,
+                                    self.root_component_props.borrow(),
+                                );
+                            },
+                        );
+                    },
+                );
+                (
+                    context.did_clear_terminal_output,
+                    context.force_full_repaint,
+                    context.invalidate_prev_frame,
+                )
             };
-            let mut component_context_stack = ContextStack::root(&mut self.system_context);
-            // CC Ink dispatches hit-test/focus events from a single DOM root.
-            // Seed an equivalent root event context for the whole iocraft tree so
-            // transparent root components (Fragment, ContextProvider, etc.) share
-            // one topmost click/hover registry instead of acting like independent
-            // roots. The hovered set persists across frames like CC Ink's
-            // `hoveredNodes`, while the per-frame hit registries are rebuilt below.
-            self.root_view_event_context.begin_root_event_frame();
-            component_context_stack.with_context(
-                Some(Context::owned(ExitOnCtrlCContext(exit_on_ctrl_c))),
-                |component_context_stack| {
-                    component_context_stack.with_context(
-                        Some(Context::owned(self.root_view_event_context.clone())),
-                        |component_context_stack| {
-                            self.root_component.update(
-                                &mut context,
-                                &mut wrapper_child_node_ids,
-                                component_context_stack,
-                                self.root_component_props.borrow(),
-                            );
-                        },
-                    );
-                },
-            );
-            (
-                context.did_clear_terminal_output,
-                context.force_full_repaint,
-                context.invalidate_prev_frame,
-            )
-        };
+            did_clear_terminal_output |= did_clear;
+            force_full_repaint |= force_full;
+            invalidate_prev_frame |= invalidate;
+            if settle_rounds_left == 0 {
+                break;
+            }
+            settle_rounds_left -= 1;
+            if !self.root_component.settle_poll() {
+                break;
+            }
+        }
         let update_duration = update_start.map_or(Duration::ZERO, |start| start.elapsed());
         let layout_start = profile_enabled.then(std::time::Instant::now);
         let measure_invocations = std::cell::Cell::new(0usize);
