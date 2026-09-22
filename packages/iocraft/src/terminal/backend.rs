@@ -310,6 +310,19 @@ static INSTALL_PANIC_HOOK: std::sync::Once = std::sync::Once::new();
 /// to stdout: raw mode is a tty-level state (restored via ioctl, not the stream), and
 /// the escape sequences reach the same tty regardless of which stream the renderer was
 /// configured to use.
+// Diagnostic kill-switch for the inline diff damage-skip fast path. The skip
+// is sound only while every canvas write path marks its rows; set
+// IOCRAFT_DIFF_DAMAGE_SKIP=0 to force full per-row scans when bisecting
+// stale-output artifacts.
+fn damage_skip_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("IOCRAFT_DIFF_DAMAGE_SKIP")
+            .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+            .unwrap_or(true)
+    })
+}
+
 fn restore_terminal_for_panic() {
     let state = PANIC_RESTORE_STATE
         .lock()
@@ -395,6 +408,15 @@ pub(super) struct StdTerminal<'a> {
     /// `clear_canvas` assumes the cursor sits on the canvas's last row, so this
     /// displacement must be undone (see `restore_cursor_baseline`) before either runs.
     pub(super) cursor_displacement_rows: u16,
+    /// Blank terminal rows between the inline canvas's last row and the physical
+    /// screen bottom. Shrinking frames clear trailing rows without un-scrolling,
+    /// so the canvas bottom drifts up from the screen bottom; growing frames
+    /// re-occupy those rows before any real scrolling happens. The reachability
+    /// math in `inline_unreachable_rows_for_diff` assumes the canvas bottom sits
+    /// on the screen bottom, so this gap must be added to the frame height there
+    /// — otherwise MoveToPreviousLine gets clamped at the viewport top and every
+    /// subsequent relative write lands one row off (stale border artifacts).
+    pub(super) inline_bottom_gap: u16,
     /// Whether the last inline canvas write ended in the terminal's right-margin
     /// auto-wrap pending state. VT terminals typically delay wrapping until the next
     /// printable byte; before relative cursor movement we resolve that pending state
@@ -722,6 +744,10 @@ impl TerminalImpl for StdTerminal<'_> {
 
     fn clear_canvas(&mut self) -> io::Result<()> {
         self.restore_cursor_baseline()?;
+        // Every caller follows a clear with a full rewrite; the rewrite either
+        // scrolls until the canvas bottom sits on the screen bottom again or
+        // leaves the viewport under-full, and the gap is zero in both cases.
+        self.inline_bottom_gap = 0;
         if self.prev_canvas_height == 0 {
             return Ok(());
         }
@@ -829,6 +855,7 @@ impl TerminalImpl for StdTerminal<'_> {
                 self.write_fullscreen_canvas_absolute(canvas)?;
                 self.park_fullscreen_cursor_after_write(canvas.height())?;
             } else {
+                self.inline_bottom_gap = 0;
                 self.write_inline_canvas_without_final_newline(canvas)?;
                 self.inline_force_full_rewrite_next_diff = true;
             }
@@ -952,7 +979,11 @@ impl TerminalImpl for StdTerminal<'_> {
             // scan below cannot find a change there. On a large resumed
             // session this collapses the scan from O(canvas rows) to
             // O(written rows).
-            if y < new_height && y < prev_height && !canvas.row_written(y) && !prev.row_written(y)
+            if damage_skip_enabled()
+                && y < new_height
+                && y < prev_height
+                && !canvas.row_written(y)
+                && !prev.row_written(y)
             {
                 continue;
             }
@@ -999,6 +1030,12 @@ impl TerminalImpl for StdTerminal<'_> {
                             self.move_inline_to_next_line(move_to_last as u16)?;
                         }
                         let new_lines = y - last_existing_line;
+                        // New rows first re-occupy blank rows left by earlier
+                        // shrinks (the \r\n is a plain cursor move there — no
+                        // scrolling) before genuinely extending the screen.
+                        self.inline_bottom_gap = self
+                            .inline_bottom_gap
+                            .saturating_sub(new_lines.min(u16::MAX as usize) as u16);
                         for _ in 0..new_lines {
                             self.write_inline_newline()?;
                         }
@@ -1032,6 +1069,14 @@ impl TerminalImpl for StdTerminal<'_> {
             std::cmp::Ordering::Equal => {}
         }
 
+        // A shrinking frame clears its trailing rows in place; the screen does
+        // not scroll back, so those rows stay behind as a blank gap below the
+        // new canvas bottom.
+        if new_height < prev_height {
+            self.inline_bottom_gap = self
+                .inline_bottom_gap
+                .saturating_add((prev_height - new_height).min(u16::MAX as usize) as u16);
+        }
         self.prev_canvas_height = new_height as _;
         Ok(())
     }
@@ -1112,6 +1157,7 @@ impl<'a> StdTerminal<'a> {
             prev_size_on_write: None,
             cursor_visible: false,
             cursor_displacement_rows: 0,
+            inline_bottom_gap: 0,
             inline_pending_wrap: false,
             decstbm_safe: false,
             inline_force_full_rewrite_next_diff: false,
@@ -1165,6 +1211,7 @@ impl<'a> StdTerminal<'a> {
         self.prev_canvas_top_row = 0;
         self.prev_size_on_write = None;
         self.cursor_displacement_rows = 0;
+        self.inline_bottom_gap = 0;
         self.inline_pending_wrap = false;
         self.inline_force_full_rewrite_next_diff = false;
     }
@@ -1287,7 +1334,7 @@ impl<'a> StdTerminal<'a> {
         next.1 < prev.1 || (prev.0 != 0 && next.0 != prev.0)
     }
 
-    fn inline_shrink_requires_full_rewrite(&self, prev_height: usize, new_height: usize) -> bool {
+    pub(super) fn inline_shrink_requires_full_rewrite(&self, prev_height: usize, new_height: usize) -> bool {
         if self.fullscreen || new_height >= prev_height {
             return false;
         }
@@ -1295,6 +1342,14 @@ impl<'a> StdTerminal<'a> {
             return false;
         };
         let rows = rows as usize;
+
+        // Trailing-row clears walk the cursor down with CNL, which stops at the
+        // screen bottom: a shrink whose cleared span (plus the blank rows an
+        // earlier shrink already left) would run past the bottom cannot be
+        // patched row-by-row. Clear and repaint instead.
+        if (prev_height - new_height) + self.inline_bottom_gap as usize >= rows {
+            return true;
+        }
         if rows == 0 {
             return false;
         }
@@ -1307,7 +1362,7 @@ impl<'a> StdTerminal<'a> {
         prev_height >= rows && new_height <= rows
     }
 
-    fn inline_unreachable_rows_for_diff(&self, prev_height: usize) -> usize {
+    pub(super) fn inline_unreachable_rows_for_diff(&self, prev_height: usize) -> usize {
         if self.fullscreen {
             return 0;
         }
@@ -1319,8 +1374,14 @@ impl<'a> StdTerminal<'a> {
             return 0;
         }
 
-        let viewport_y = prev_height.saturating_sub(rows);
-        let cursor_restore_scroll = usize::from(prev_height >= rows);
+        // The viewport's bottom rows may be blank leftovers from earlier
+        // shrinking frames (`inline_bottom_gap`), so only `rows - gap` canvas
+        // rows are physically on screen. Ignoring the gap would let the diff
+        // target rows that already scrolled out, and the resulting clamped
+        // MoveToPreviousLine would misalign every subsequent write.
+        let physical_height = prev_height + self.inline_bottom_gap as usize;
+        let viewport_y = physical_height.saturating_sub(rows);
+        let cursor_restore_scroll = usize::from(physical_height >= rows);
         viewport_y + cursor_restore_scroll
     }
 
@@ -1453,6 +1514,11 @@ impl<'a> StdTerminal<'a> {
                             self.move_inline_to_next_line(move_to_last as u16)?;
                         }
                         let new_lines = y - last_existing_line;
+                        // Same gap bookkeeping as the row-diff writer: new rows
+                        // re-occupy blank shrink leftovers before scrolling.
+                        self.inline_bottom_gap = self
+                            .inline_bottom_gap
+                            .saturating_sub(new_lines.min(u16::MAX as usize) as u16);
                         for _ in 0..new_lines {
                             self.write_inline_newline()?;
                         }
@@ -1482,6 +1548,12 @@ impl<'a> StdTerminal<'a> {
                 self.move_inline_to_previous_line((current_y - target_y) as u16)?;
             }
             std::cmp::Ordering::Equal => {}
+        }
+
+        if new_height < prev_height {
+            self.inline_bottom_gap = self
+                .inline_bottom_gap
+                .saturating_add((prev_height - new_height).min(u16::MAX as usize) as u16);
         }
 
         Ok(true)

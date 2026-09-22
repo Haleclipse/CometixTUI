@@ -929,6 +929,7 @@ fn new_fullscreen_term(
         prev_size_on_write: None,
         cursor_visible: false,
         cursor_displacement_rows: 0,
+        inline_bottom_gap: 0,
         inline_pending_wrap: false,
         decstbm_safe: false,
         inline_force_full_rewrite_next_diff: false,
@@ -963,6 +964,7 @@ fn new_inline_term_with_size(
         prev_size_on_write: None,
         cursor_visible: false,
         cursor_displacement_rows: 0,
+        inline_bottom_gap: 0,
         inline_pending_wrap: false,
         decstbm_safe: false,
         inline_force_full_rewrite_next_diff: false,
@@ -4648,4 +4650,95 @@ fn test_fullscreen_initial_write_sets_zero_top_row() {
     assert_eq!(vt.line(2).text(), "row2      ");
     assert_eq!(vt.line(3).text(), "row3      ");
     assert_eq!(vt.line(4).text(), "FOOTER    ");
+}
+
+/// Builds the prompt-box shape that reproduces the shrink misalignment: a
+/// history region that never changes, then border/input/status rows that ride
+/// the bottom of the canvas as it grows and shrinks.
+fn prompt_box_canvas(height: usize) -> Canvas {
+    let style = CanvasTextStyle::default();
+    let mut canvas = Canvas::new(10, height);
+    let mut view = canvas.subview_mut(0, 0, 0, 0, 10, height);
+    for y in 0..height.saturating_sub(3) {
+        view.set_text(0, y as isize, &format!("hist{y}"), style);
+    }
+    view.set_text(0, height as isize - 3, "border", style);
+    view.set_text(0, height as isize - 2, "input", style);
+    view.set_text(0, height as isize - 1, "status", style);
+    canvas
+}
+
+/// Regression test for the inline shrink misalignment: clearing trailing rows
+/// does not un-scroll the terminal, so after a shrink the canvas bottom no
+/// longer sits on the screen bottom. The reachability math must account for
+/// that gap; without it, MoveToPreviousLine clamps at the viewport top and
+/// every later row lands one row off, leaving stale border rows behind.
+#[test]
+fn test_inline_shrink_then_diff_has_no_stale_rows() {
+    // Heights stay above the 5-row viewport so no frame takes the
+    // shrink-to-viewport full-rewrite branch; the gap must reach 2 (two
+    // consecutive shrinks) before the reachability bug bites, because the
+    // cursor-restore-scroll guard happens to absorb a gap of 1.
+    let heights = [12usize, 11, 10, 9, 8];
+    let mut frames = heights.iter().map(|&h| prompt_box_canvas(h));
+    let first = frames.next().unwrap();
+
+    let (dest, buf) = new_test_writer();
+    let mut term = new_inline_term_with_size(dest, first.height() as _, (10, 5));
+    term.prev_size_on_write = term.size;
+
+    let mut feed = Vec::new();
+    first.write_ansi_without_final_newline(&mut feed).unwrap();
+
+    let mut prev = first;
+    for next in frames {
+        buf.lock().unwrap().clear();
+        term.write_canvas(Some(&prev), &next).unwrap();
+        feed.extend_from_slice(&buf.lock().unwrap());
+        prev = next;
+    }
+
+    let mut vt = avt::Vt::new(10, 5);
+    vt.feed_str(&String::from_utf8(feed).unwrap());
+
+    // The screen must show exactly the final canvas's visible tail — no stale
+    // border rows from the taller frames, no rows misaligned by a clamped
+    // MoveToPreviousLine.
+    assert_eq!(vt.line(0).text(), "hist3     ");
+    assert_eq!(vt.line(1).text(), "hist4     ");
+    assert_eq!(vt.line(2).text(), "border    ");
+    assert_eq!(vt.line(3).text(), "input     ");
+    assert_eq!(vt.line(4).text(), "status    ");
+}
+
+/// The bookkeeping behind the regression above: shrinks accumulate the blank
+/// bottom gap, growth consumes it, the reachability boundary includes it, and
+/// oversized shrinks bail to a full rewrite instead of walking clears past the
+/// screen bottom.
+#[test]
+fn test_inline_bottom_gap_bookkeeping() {
+    let (dest, _buf) = new_test_writer();
+    let mut term = new_inline_term_with_size(dest, 8, (10, 5));
+    term.prev_size_on_write = term.size;
+
+    assert_eq!(term.inline_unreachable_rows_for_diff(8), 4);
+
+    let tall = prompt_box_canvas(8);
+    let shorter = prompt_box_canvas(7);
+    term.write_canvas(Some(&tall), &shorter).unwrap();
+    assert_eq!(term.inline_bottom_gap, 1);
+    // 7 canvas rows + 1 blank gap row still fill the 5-row viewport.
+    assert_eq!(term.inline_unreachable_rows_for_diff(7), 4);
+
+    // A grow re-occupies the blank row without scrolling.
+    let taller = prompt_box_canvas(8);
+    term.write_canvas(Some(&shorter), &taller).unwrap();
+    assert_eq!(term.inline_bottom_gap, 0);
+
+    // A shrink whose cleared span plus the standing gap reaches the viewport
+    // height cannot be patched row-by-row.
+    term.inline_bottom_gap = 3;
+    assert!(term.inline_shrink_requires_full_rewrite(8, 6));
+    term.inline_bottom_gap = 0;
+    assert!(!term.inline_shrink_requires_full_rewrite(8, 6));
 }
