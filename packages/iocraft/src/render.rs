@@ -43,6 +43,44 @@ pub(crate) struct UpdateContext<'a, 'w> {
     invalidate_prev_frame: bool,
 }
 
+/// Opt-in gate for the profiling-only changed-cell count: an O(canvas) scan
+/// that would otherwise dominate profiled frames on large sessions. Enable
+/// with IOCRAFT_PROFILE_CHANGED_CELLS=1 when the analysis actually needs
+/// per-frame changed-cell numbers.
+fn changed_cell_count_enabled() -> bool {
+    #[cfg(test)]
+    {
+        match CHANGED_CELL_COUNT_TEST_OVERRIDE.with(|cell| cell.get()) {
+            1 => return false,
+            2 => return true,
+            _ => {}
+        }
+    }
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("IOCRAFT_PROFILE_CHANGED_CELLS")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    static CHANGED_CELL_COUNT_TEST_OVERRIDE: std::cell::Cell<u8> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_changed_cell_count_for_tests(enabled: Option<bool>) {
+    CHANGED_CELL_COUNT_TEST_OVERRIDE.with(|cell| {
+        cell.set(match enabled {
+            None => 0,
+            Some(false) => 1,
+            Some(true) => 2,
+        })
+    });
+}
+
 /// Callback invoked after a terminal render-loop frame when frame profiling is enabled.
 pub type FrameProfileCallback<'a> = Box<dyn FnMut(RenderFrameProfile) + Send + 'a>;
 
@@ -91,6 +129,21 @@ pub struct RenderFramePhases {
     /// Time spent rebuilding the mouse-event cell snapshot from the committed
     /// canvas (O(canvas) today; a candidate for damage-driven updates).
     pub event_snapshot: Duration,
+    /// Time spent allocating/zeroing the frame's fresh canvas (O(canvas)).
+    pub canvas_alloc: Duration,
+    /// Time spent installing the new canvas as the retained previous frame,
+    /// including dropping the old one (O(canvas) worst case).
+    pub canvas_swap: Duration,
+    /// Render-phase settle rounds taken this frame (push-wake only): extra
+    /// same-frame update re-runs consuming update-phase state writes.
+    pub settle_rounds: usize,
+    /// Total live layout-engine nodes — the taffy counterpart of CC ink's
+    /// per-frame `yogaLive` counter.
+    pub layout_nodes: usize,
+    /// Wall time of the whole synchronized-update section; total minus this
+    /// is the loop's own bookkeeping, and this minus the summed inner phases
+    /// exposes flush/wrapper overhead that has no phase of its own.
+    pub sync_wrap: Duration,
 }
 
 /// Accumulator for [`RenderFrameProfile`] events.
@@ -272,6 +325,8 @@ struct RenderPhaseProfile {
     layout: Duration,
     draw: Duration,
     layout_measures: usize,
+    canvas_alloc: Duration,
+    settle_rounds: usize,
 }
 
 mod absolute_descendants;
@@ -1380,6 +1435,7 @@ impl<'a> Tree<'a> {
         // pathological update-loops; the leftover change then simply schedules
         // a normal frame like today.
         let mut settle_rounds_left = if wake::push_wake_enabled() { 2 } else { 0 };
+        let mut settle_rounds_taken = 0usize;
         loop {
             wrapper_child_node_ids.truncate(1);
             let (did_clear, force_full, invalidate) = {
@@ -1430,6 +1486,7 @@ impl<'a> Tree<'a> {
             if !self.root_component.settle_poll() {
                 break;
             }
+            settle_rounds_taken += 1;
         }
         let update_duration = update_start.map_or(Duration::ZERO, |start| start.elapsed());
         let layout_start = profile_enabled.then(std::time::Instant::now);
@@ -1566,7 +1623,10 @@ impl<'a> Tree<'a> {
         let canvas_height = fullscreen_size
             .map(|(_, rows)| rows)
             .unwrap_or(wrapper_layout.size.height as usize);
+        let canvas_alloc_start = profile_enabled.then(std::time::Instant::now);
         let mut canvas = Canvas::new(canvas_width, canvas_height);
+        let canvas_alloc =
+            canvas_alloc_start.map_or(Duration::ZERO, |start| start.elapsed());
         let mut deferred_no_select = Vec::new();
         let root_layout = self
             .layout_engine
@@ -1630,6 +1690,8 @@ impl<'a> Tree<'a> {
                 layout: layout_duration,
                 draw: draw_duration,
                 layout_measures: measure_invocations.get(),
+                canvas_alloc,
+                settle_rounds: settle_rounds_taken,
             },
         }
     }
@@ -1696,6 +1758,7 @@ impl<'a> Tree<'a> {
             let frame_start = profile_enabled.then(std::time::Instant::now);
             let mut frame_phases = RenderFramePhases::default();
             let mut repaint = None;
+            let sync_wrap_start = profile_enabled.then(std::time::Instant::now);
             term.synchronized_update(|mut term| {
                 let mut output = self.render(
                     terminal_size.map(|(w, _)| w as usize),
@@ -1741,7 +1804,12 @@ impl<'a> Tree<'a> {
                         )
                     } else {
                         let changed_cell_scan_start = profile_enabled.then(std::time::Instant::now);
-                        let changed_cells = if profile_enabled {
+                        // The observer-effect trap: this O(canvas) scan exists
+                        // only for profiling and was dominating profiled frames
+                        // (~5.8ms on a 380k-cell resumed session). Gate it so
+                        // frame logs stay cheap unless cell counts are asked
+                        // for explicitly.
+                        let changed_cells = if profile_enabled && changed_cell_count_enabled() {
                             count_changed_cells(prev_canvas.as_ref(), &output.canvas)
                         } else {
                             0
@@ -1807,6 +1875,9 @@ impl<'a> Tree<'a> {
                 frame_phases.layout = output.phase_profile.layout;
                 frame_phases.draw = output.phase_profile.draw;
                 frame_phases.layout_measures = output.phase_profile.layout_measures;
+                frame_phases.canvas_alloc = output.phase_profile.canvas_alloc;
+                frame_phases.settle_rounds = output.phase_profile.settle_rounds;
+                frame_phases.layout_nodes = self.layout_engine.total_node_count();
                 frame_phases.diff_rows_scanned = diff_rows_scanned;
                 frame_phases.changed_cells = changed_cells;
                 frame_phases.canvas_width = output.canvas.width();
@@ -1817,7 +1888,10 @@ impl<'a> Tree<'a> {
                 // frames still scan regions dirtied by the last render, while
                 // Canvas equality ignores damage so this does not wake idle
                 // renders by itself.
+                let canvas_swap_start = profile_enabled.then(std::time::Instant::now);
                 prev_canvas = Some(output.canvas);
+                frame_phases.canvas_swap =
+                    canvas_swap_start.map_or(Duration::ZERO, |start| start.elapsed());
                 if let Some(canvas) = prev_canvas.as_ref() {
                     let snapshot_start = profile_enabled.then(std::time::Instant::now);
                     term.set_event_cell_snapshot(canvas);
@@ -1827,6 +1901,8 @@ impl<'a> Tree<'a> {
                 prev_terminal_size = terminal_size;
                 Ok(())
             })?;
+            frame_phases.sync_wrap =
+                sync_wrap_start.map_or(Duration::ZERO, |start| start.elapsed());
             if let (Some(callback), Some(start)) = (frame_profile.as_mut(), frame_start) {
                 callback(RenderFrameProfile {
                     duration: start.elapsed(),

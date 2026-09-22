@@ -983,6 +983,11 @@ fn test_frame_profile_stats_accumulates_benchmark_metrics() {
             canvas_height: 2,
             layout_measures: 0,
             event_snapshot: Duration::ZERO,
+            canvas_alloc: Duration::ZERO,
+            canvas_swap: Duration::ZERO,
+            settle_rounds: 0,
+            layout_nodes: 0,
+            sync_wrap: Duration::ZERO,
         },
         repaint: Some(DebugRepaintInfo {
             reason: DebugRepaintReason::FirstFrame,
@@ -1008,6 +1013,11 @@ fn test_frame_profile_stats_accumulates_benchmark_metrics() {
             canvas_height: 2,
             layout_measures: 0,
             event_snapshot: Duration::ZERO,
+            canvas_alloc: Duration::ZERO,
+            canvas_swap: Duration::ZERO,
+            settle_rounds: 0,
+            layout_nodes: 0,
+            sync_wrap: Duration::ZERO,
         },
         repaint: None,
     });
@@ -1032,6 +1042,8 @@ fn test_frame_profile_stats_accumulates_benchmark_metrics() {
 
 #[apply(test!)]
 async fn test_frame_profile_callback_reports_repaint_phases() {
+    // These assertions depend on the profiling-only changed-cell scan.
+    crate::render::set_changed_cell_count_for_tests(Some(true));
     let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let events_for_callback = events.clone();
     let mut element = element!(MyComponent);
@@ -1117,6 +1129,8 @@ async fn test_mock_terminal_render_loop_with_single_pass_diff_planning_reports_r
 
 #[apply(test!)]
 async fn test_mock_terminal_render_loop_with_profile_reports_events() {
+    // These assertions depend on the profiling-only changed-cell scan.
+    crate::render::set_changed_cell_count_for_tests(Some(true));
     let stats = std::sync::Arc::new(std::sync::Mutex::new(RenderFrameProfileStats::default()));
     let stats_for_callback = stats.clone();
     let canvases: Vec<_> = element!(MyComponent)
