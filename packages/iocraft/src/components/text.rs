@@ -594,6 +594,7 @@ impl Component for Text {
         };
         self.background_color = props.background_color;
         self.hyperlink = props.href.clone();
+        let prev_wrap = self.wrap;
         self.wrap = props.wrap;
         self.align = props.align;
 
@@ -642,9 +643,21 @@ impl Component for Text {
             return;
         }
 
+        let was_structured = self.structured;
         self.structured = false;
-        self.content = strip_ansi(&props.content).into_owned();
-        updater.set_measure_func(Self::measure_func(self.content.clone(), props.wrap));
+        let content = strip_ansi(&props.content).into_owned();
+        // Re-installing the measure function marks the Taffy node dirty,
+        // which invalidates the layout cache up the ancestor chain — for
+        // every Text, every frame. Only do it when the measure inputs
+        // actually changed; otherwise Taffy's caches stay warm and the
+        // root's dirty bit remains a truthful "layout may have shifted"
+        // signal.
+        if was_structured || prev_wrap != props.wrap || content != self.content {
+            self.content = content;
+            updater.set_measure_func(Self::measure_func(self.content.clone(), props.wrap));
+        } else {
+            self.content = content;
+        }
     }
 
     fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {

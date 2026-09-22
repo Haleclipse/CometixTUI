@@ -1411,9 +1411,20 @@ impl<'a> Tree<'a> {
                 None
             }
         });
-        self.layout_engine
-            .set_children(self.wrapper_node_id, &wrapper_child_node_ids)
-            .expect("we should be able to set the children");
+        // Both set_children and set_style mark the wrapper dirty in Taffy,
+        // which would make the root's dirty bit useless as a "layout inputs
+        // changed" signal and defeat Taffy's layout caches. Skip the no-op
+        // writes.
+        let children_unchanged = self
+            .layout_engine
+            .children(self.wrapper_node_id)
+            .map(|current| current == wrapper_child_node_ids)
+            .unwrap_or(false);
+        if !children_unchanged {
+            self.layout_engine
+                .set_children(self.wrapper_node_id, &wrapper_child_node_ids)
+                .expect("we should be able to set the children");
+        }
         let mut wrapper_style = Style::default();
         if let Some(max_width) = max_width {
             // Mirror CC Ink's root layout contract: when rendering to a
@@ -1428,9 +1439,25 @@ impl<'a> Tree<'a> {
             // against the viewport just like CC Ink's <AlternateScreen> Box.
             wrapper_style.size.height = taffy::style::Dimension::length(rows as f32);
         }
-        self.layout_engine
-            .set_style(self.wrapper_node_id, wrapper_style)
-            .expect("we should be able to set the wrapper style");
+        let wrapper_style_unchanged = self
+            .layout_engine
+            .style(self.wrapper_node_id)
+            .map(|current| *current == wrapper_style)
+            .unwrap_or(false);
+        if !wrapper_style_unchanged {
+            self.layout_engine
+                .set_style(self.wrapper_node_id, wrapper_style)
+                .expect("we should be able to set the wrapper style");
+        }
+
+        // Read BEFORE compute_layout clears it: if no style, measure function,
+        // child list or explicit mark_dirty touched the tree since the last
+        // frame, the layout output cannot have moved and the whole-tree
+        // layout-shift snapshot below can be skipped.
+        let layout_inputs_dirty = self
+            .layout_engine
+            .dirty(self.wrapper_node_id)
+            .unwrap_or(true);
 
         self.layout_engine
             .compute_layout_with_measure(
@@ -1478,7 +1505,14 @@ impl<'a> Tree<'a> {
             .expect("we should be able to compute the layout");
 
         debug_dump_layout_tree(&self.layout_engine, self.wrapper_node_id);
-        let layout_shifted = self.update_layout_shift_state();
+        // Whole-tree snapshot walk (every node + a layout-engine lock each)
+        // only runs when some layout input actually changed this frame;
+        // otherwise the previous verdict trivially holds: nothing moved.
+        let layout_shifted = if layout_inputs_dirty {
+            self.update_layout_shift_state()
+        } else {
+            false
+        };
         let layout_duration = layout_start.map_or(Duration::ZERO, |start| start.elapsed());
         let draw_start = profile_enabled.then(std::time::Instant::now);
         let wrapper_layout = self
