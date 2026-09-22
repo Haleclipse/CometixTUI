@@ -258,6 +258,12 @@ impl CanvasSubviewMut<'_> {
         let dst_top = dst_top as usize;
         let copy_width = copy_width as usize;
         let copy_height = copy_height as usize;
+        // Subview blits copy from arbitrary sources (e.g. ScrollBox moving
+        // viewport content), so the destination rows genuinely change and are
+        // always marked written — independent of the damage flag, which only
+        // controls repaint wake-up.
+        self.canvas
+            .mark_rows_written_range(dst_top, dst_top.saturating_add(copy_height));
         let mut damage_width = copy_width;
 
         for row_offset in 0..copy_height {

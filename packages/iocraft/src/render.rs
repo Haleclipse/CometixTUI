@@ -88,6 +88,9 @@ pub struct RenderFramePhases {
     /// counterpart of CC ink's per-frame `yogaMeasured` counter. A jump here
     /// on an otherwise idle frame means Taffy's measure cache missed.
     pub layout_measures: usize,
+    /// Time spent rebuilding the mouse-event cell snapshot from the committed
+    /// canvas (O(canvas) today; a candidate for damage-driven updates).
+    pub event_snapshot: Duration,
 }
 
 /// Accumulator for [`RenderFrameProfile`] events.
@@ -796,7 +799,12 @@ impl ComponentDrawer<'_> {
                 return false;
             }
         }
-        self.context.canvas.blit_region_from(prev, x, y, width, height);
+        // Baseline variant: `prev` here is exactly the terminal diff baseline
+        // (the previous committed frame), so the copied rows stay unmarked and
+        // the diff writer can skip their cell scans.
+        self.context
+            .canvas
+            .blit_region_from_baseline(prev, x, y, width, height);
         true
     }
 
@@ -1736,7 +1744,10 @@ impl<'a> Tree<'a> {
                 // renders by itself.
                 prev_canvas = Some(output.canvas);
                 if let Some(canvas) = prev_canvas.as_ref() {
+                    let snapshot_start = profile_enabled.then(std::time::Instant::now);
                     term.set_event_cell_snapshot(canvas);
+                    frame_phases.event_snapshot =
+                        snapshot_start.map_or(Duration::ZERO, |start| start.elapsed());
                 }
                 prev_terminal_size = terminal_size;
                 Ok(())

@@ -266,6 +266,14 @@ pub struct Canvas {
     pub(super) scroll_hint: Option<ScrollHint>,
     pub(super) force_full_repaint: bool,
     pub(super) damage_region: Option<DamageRegion>,
+    /// Per-row write tracking for damage-driven terminal diffs. A row is
+    /// marked whenever any mutating entry point touches it; rows copied from
+    /// the diff-baseline frame via the clean blit variant stay unmarked
+    /// (their cells are identical to that baseline by construction). A row
+    /// unmarked in BOTH frames of a diff is provably unchanged, so terminal
+    /// writers can skip its cell scan. Excluded from `PartialEq` (bookkeeping,
+    /// not content).
+    pub(super) dirty_rows: Vec<bool>,
 }
 
 impl PartialEq for Canvas {
@@ -439,7 +447,28 @@ impl Canvas {
             scroll_hint: None,
             force_full_repaint: false,
             damage_region: None,
+            dirty_rows: vec![false; height],
         }
+    }
+
+    /// Marks rows `[top, bottom)` as written this frame (see `dirty_rows`).
+    #[inline]
+    fn mark_rows_written(&mut self, top: usize, bottom: usize) {
+        let end = bottom.min(self.dirty_rows.len());
+        for row in &mut self.dirty_rows[top.min(end)..end] {
+            *row = true;
+        }
+    }
+
+    /// Whether the row was touched by any mutating entry point this frame.
+    /// Out-of-range rows report true so callers never skip on bad indices.
+    pub(crate) fn row_written(&self, y: usize) -> bool {
+        self.dirty_rows.get(y).copied().unwrap_or(true)
+    }
+
+    /// Cross-module form of `mark_rows_written` for the subview writer.
+    pub(super) fn mark_rows_written_range(&mut self, top: usize, bottom: usize) {
+        self.mark_rows_written(top, bottom);
     }
 
     /// Marks a rectangular region as excluded from fullscreen text selection.
@@ -448,6 +477,7 @@ impl Canvas {
     /// equality, or damage. It mirrors CC Ink's `screen.noSelect` bitmap, which
     /// is consumed by selection/copy/highlight code rather than the diff writer.
     pub fn mark_no_select_region(&mut self, x: usize, y: usize, width: usize, height: usize) {
+        self.mark_rows_written(y, y.saturating_add(height));
         if width == 0 || height == 0 {
             return;
         }
@@ -717,6 +747,7 @@ impl Canvas {
     /// selection copy joins continuation rows without inserting `\n`, and uses
     /// the previous row's content end to avoid copying unwritten padding.
     pub fn mark_soft_wrap_continuation(&mut self, row: usize, prev_content_end: usize) {
+        self.mark_rows_written(row, row.saturating_add(1));
         if let Some(slot) = self.soft_wrap.get_mut(row) {
             *slot = prev_content_end.min(self.width);
         }
@@ -983,6 +1014,7 @@ impl Canvas {
     /// grapheme at either horizontal edge, the orphaned head/tail just outside
     /// the region is repaired and included in the damage bounds.
     pub fn clear_region(&mut self, x: usize, y: usize, width: usize, height: usize) {
+        self.mark_rows_written(y, y.saturating_add(height));
         if width == 0 || height == 0 || x >= self.width || y >= self.height() {
             return;
         }
@@ -1061,6 +1093,36 @@ impl Canvas {
         width: usize,
         height: usize,
     ) {
+        self.mark_rows_written(y, y.saturating_add(height));
+        self.blit_region_from_unmarked(src, x, y, width, height);
+    }
+
+    /// [`Self::blit_region_from`] without marking the rows written.
+    ///
+    /// ONLY valid when `src` is the terminal diff baseline (the previous
+    /// committed frame): the copied rows are then identical to that baseline
+    /// by construction, so leaving them unmarked lets the diff writer skip
+    /// them. Copying from any other canvas through this variant would hide
+    /// real changes from the terminal.
+    pub(crate) fn blit_region_from_baseline(
+        &mut self,
+        src: &Canvas,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+    ) {
+        self.blit_region_from_unmarked(src, x, y, width, height);
+    }
+
+    fn blit_region_from_unmarked(
+        &mut self,
+        src: &Canvas,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+    ) {
         if width == 0 || height == 0 || x >= self.width || x >= src.width {
             return;
         }
@@ -1127,6 +1189,7 @@ impl Canvas {
         height: usize,
         excluded_clears: &[DamageRegion],
     ) {
+        self.mark_rows_written(y, y.saturating_add(height));
         if excluded_clears.is_empty() {
             self.blit_region_from(src, x, y, width, height);
             return;
@@ -1165,6 +1228,7 @@ impl Canvas {
     }
 
     pub(crate) fn shift_rows(&mut self, top: usize, bottom: usize, delta: i32) {
+        self.mark_rows_written(top, bottom);
         if delta == 0 || top > bottom || bottom >= self.height() {
             return;
         }
@@ -1541,6 +1605,7 @@ impl Canvas {
     }
 
     pub(super) fn clear_text(&mut self, x: usize, y: usize, w: usize, h: usize) {
+        self.mark_rows_written(y, y.saturating_add(h));
         for y in y..y + h {
             if let Some(row) = self.cells.get_mut(y) {
                 for x in x..x + w {
@@ -1560,6 +1625,7 @@ impl Canvas {
         h: usize,
         color: Color,
     ) {
+        self.mark_rows_written(y, y.saturating_add(h));
         for y in y..y + h {
             if let Some(row) = self.cells.get_mut(y) {
                 for x in x..x + w {
@@ -1614,6 +1680,7 @@ impl Canvas {
         style: CanvasTextStyle,
         hyperlink: Option<&str>,
     ) {
+        self.mark_rows_written(y, y.saturating_add(1));
         let row = &mut self.cells[y];
         if row.is_empty() {
             return;
@@ -1730,6 +1797,7 @@ impl Canvas {
     /// is a `WidthTail`, the overlay is applied to both the tail and its leading `Wide`
     /// cell. Callers do not need to know whether a cell is wide.
     pub fn set_overlay(&mut self, x: usize, y: usize, overlay: StyleOverlay) {
+        self.mark_rows_written(y, y.saturating_add(1));
         if let Some(row) = self.overlays.get_mut(y) {
             if let Some(slot) = row.get_mut(x) {
                 Self::compose_overlay_slot(slot, overlay);
@@ -1768,6 +1836,7 @@ impl Canvas {
         h: usize,
         overlay: StyleOverlay,
     ) {
+        self.mark_rows_written(y, y.saturating_add(h));
         for row_idx in y..y + h {
             if let Some(row) = self.overlays.get_mut(row_idx) {
                 for col_idx in x..x + w {
@@ -1781,6 +1850,7 @@ impl Canvas {
 
     /// Clears the overlay on a single cell.
     pub fn clear_overlay(&mut self, x: usize, y: usize) {
+        self.mark_rows_written(y, y.saturating_add(1));
         if let Some(row) = self.overlays.get_mut(y) {
             if let Some(slot) = row.get_mut(x) {
                 *slot = None;
@@ -1790,6 +1860,8 @@ impl Canvas {
 
     /// Clears all overlays on the canvas.
     pub fn clear_overlays(&mut self) {
+        let height = self.dirty_rows.len();
+        self.mark_rows_written(0, height);
         for row in &mut self.overlays {
             row.fill(None);
         }

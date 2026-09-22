@@ -981,6 +981,8 @@ fn test_frame_profile_stats_accumulates_benchmark_metrics() {
             changed_cells: 5,
             canvas_width: 10,
             canvas_height: 2,
+            layout_measures: 0,
+            event_snapshot: Duration::ZERO,
         },
         repaint: Some(DebugRepaintInfo {
             reason: DebugRepaintReason::FirstFrame,
@@ -1004,6 +1006,8 @@ fn test_frame_profile_stats_accumulates_benchmark_metrics() {
             changed_cells: 9,
             canvas_width: 10,
             canvas_height: 2,
+            layout_measures: 0,
+            event_snapshot: Duration::ZERO,
         },
         repaint: None,
     });

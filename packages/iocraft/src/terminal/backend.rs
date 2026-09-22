@@ -946,6 +946,16 @@ impl TerminalImpl for StdTerminal<'_> {
         let mut current_y = prev_height.saturating_sub(1);
 
         for y in 0..max_height {
+            // Damage skip: a row unwritten in BOTH frames is provably
+            // unchanged — untouched rows are default-blank, and baseline-blit
+            // rows equal the previous frame by construction — so the per-cell
+            // scan below cannot find a change there. On a large resumed
+            // session this collapses the scan from O(canvas rows) to
+            // O(written rows).
+            if y < new_height && y < prev_height && !canvas.row_written(y) && !prev.row_written(y)
+            {
+                continue;
+            }
             let Some(mut start_col) = prev.row_change_start(canvas, y) else {
                 continue;
             };
