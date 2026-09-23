@@ -121,6 +121,18 @@ impl<T: Unpin + Send + Sync + 'static> Hook for UseStateImpl<T> {
             Poll::Pending
         }
     }
+
+    fn settle_render_phase_change(&mut self, waker: &Waker) -> bool {
+        // A write that fired during the update phase is folded into the
+        // same frame's re-run update; consume it here so it does not also
+        // schedule an empty follow-up frame, and re-arm so the next write
+        // still reaches the component (the Ready-path lesson above).
+        let Ok(mut value) = self.state.inner.try_write() else {
+            return false;
+        };
+        value.waker = Some(waker.clone());
+        std::mem::take(&mut value.did_change)
+    }
 }
 
 

@@ -1483,7 +1483,7 @@ impl<'a> Tree<'a> {
                 break;
             }
             settle_rounds_left -= 1;
-            if !self.root_component.settle_poll() {
+            if !self.root_component.settle_render_phase() {
                 break;
             }
             settle_rounds_taken += 1;

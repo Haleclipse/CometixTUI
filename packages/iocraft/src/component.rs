@@ -322,19 +322,34 @@ impl InstantiatedComponent {
         }
     }
 
-    /// Settle-poll for the render-phase update loop (push mode only): consumes
-    /// any changes that fired during the update phase itself — state writes
-    /// from update bodies wake their component's proxy, so one harvest pass
-    /// both consumes the `did_change` bits and reports whether another update
-    /// round is needed. Safe only under push-wake: every hook is polled through
-    /// its component's proxy waker, so the no-op context passed here is never
-    /// stored by a hook. This is the iocraft analogue of React's render-phase
-    /// update ("setState during render re-renders before commit").
-    pub(crate) fn settle_poll(&mut self) -> bool {
+    /// Render-phase settle pass (push mode only): absorbs state writes that
+    /// the update phase itself produced, so the frame can re-run its update
+    /// and commit the settled values instead of scheduling an empty follow-up
+    /// frame. React analogue: setState during render re-renders before commit.
+    ///
+    /// Only hooks overriding [`Hook::settle_render_phase_change`] (synchronous
+    /// state cells) respond; futures, terminal events and external stores are
+    /// NOT polled here — those are outside changes and belong to the next
+    /// frame. The dirty bit is peeked, never consumed, so a future woken on
+    /// the same component is still harvested next frame. A settled change
+    /// marks `pending_change` so memo wrappers re-enter the subtree on the
+    /// re-run, exactly as a harvested change would.
+    pub(crate) fn settle_render_phase(&mut self) -> bool {
         debug_assert!(push_wake_enabled());
-        let waker = futures::task::noop_waker();
-        let mut cx = Context::from_waker(&waker);
-        Pin::new(self).poll_change(&mut cx).is_ready()
+        let mut settled = false;
+        if self.wake_state.is_dirty()
+            && self.hooks.settle_render_phase_change(&self.proxy_waker)
+        {
+            self.pending_change = true;
+            settled = true;
+        }
+        for child in self.children.components.iter_mut() {
+            if child.settle_render_phase() {
+                self.pending_change = true;
+                settled = true;
+            }
+        }
+        settled
     }
 
     pub async fn wait(&mut self) {

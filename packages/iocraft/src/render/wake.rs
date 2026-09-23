@@ -98,6 +98,14 @@ impl ComponentWakeState {
         self.dirty.swap(false, Ordering::AcqRel)
     }
 
+    /// Reads the dirty bit without consuming it. The settle pass only peeks:
+    /// consuming here would swallow a wake that also belongs to a future or
+    /// event hook on the same component, which the next frame's harvest must
+    /// still poll.
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.dirty.load(Ordering::Acquire)
+    }
+
     /// Re-marks the component dirty without waking the loop (used when a poll
     /// must be retried next frame, e.g. a borrow conflict).
     pub(crate) fn mark_dirty(&self) {
@@ -127,8 +135,13 @@ mod tests {
     // A deep child whose only change source is its own state, driven by a
     // future — the exact shape the harvest scan must keep alive: the parent
     // never re-renders it, so its wake must land on its own dirty bit.
+    //
+    // The deep counter itself ends the run once it has advanced: a parent
+    // counting its own frames is not a clock (settle rounds legitimately fold
+    // several update-phase bumps into one frame).
     #[component]
     fn DeepCounter(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
         let mut count = hooks.use_state(|| 0u32);
         hooks.use_future(async move {
             loop {
@@ -136,17 +149,14 @@ mod tests {
                 count += 1;
             }
         });
+        if count.get() >= 3 {
+            system.exit();
+        }
         element!(Text(content: format!("count={}", count)))
     }
 
     #[component]
-    fn HarvestApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-        let mut system = hooks.use_context_mut::<SystemContext>();
-        let mut frames = hooks.use_state(|| 0u32);
-        frames += 1;
-        if frames.get() >= 8 {
-            system.exit();
-        }
+    fn HarvestApp() -> impl Into<AnyElement<'static>> {
         element! {
             View(flex_direction: FlexDirection::Column) {
                 Text(content: "static header")
@@ -172,7 +182,7 @@ mod tests {
         // The deep counter advanced past its initial value: its future's
         // wakes were routed and harvested rather than dropped.
         assert!(
-            !last.contains("count=0"),
+            last.contains("count=3"),
             "deep counter never advanced under push-wake harvesting: {last:?}"
         );
         assert!(last.contains("static header"));
@@ -320,5 +330,34 @@ mod settle_tests {
             }
         };
         assert!(frames.last().unwrap().contains("tick 4"));
+    }
+
+    // A future that would resolve immediately if polled. The settle pass
+    // absorbs render-phase *state writes* only; driving futures inside the
+    // render phase would pull async work (file reads, tokio I/O) into a
+    // one-shot render and collapse every "pending" first frame.
+    #[component]
+    fn EagerFutureProbe(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut resolved = hooks.use_state(|| false);
+        let mut renders = hooks.use_state(|| 0u8);
+        // A render-phase write, so the settle pass definitely runs.
+        if renders.get() == 0 {
+            renders.set(1);
+        }
+        hooks.use_future(async move {
+            resolved.set(true);
+        });
+        element!(Text(content: format!("resolved={}", resolved)))
+    }
+
+    #[test]
+    fn test_settle_does_not_drive_futures() {
+        super::set_push_wake_for_tests(Some(true));
+        let rendered = element!(EagerFutureProbe).render(Some(40)).to_string();
+        super::set_push_wake_for_tests(None);
+        assert!(
+            rendered.contains("resolved=false"),
+            "settle polled a future inside the render phase: {rendered:?}"
+        );
     }
 }

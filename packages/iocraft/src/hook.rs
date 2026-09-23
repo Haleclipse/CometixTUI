@@ -17,6 +17,21 @@ pub trait Hook: Unpin + Send {
         Poll::Pending
     }
 
+    /// Called between render-phase update rounds (push-wake settle). Returns
+    /// true when this hook absorbed a change produced *by the update phase
+    /// itself* — a render-phase state write — so the update re-runs within the
+    /// same frame instead of scheduling a follow-up frame.
+    ///
+    /// This is deliberately narrower than [`poll_change`](Self::poll_change):
+    /// it must not drive futures, consume terminal events, or observe external
+    /// stores. Those are outside changes and belong to the next frame, exactly
+    /// as React re-renders only for setState called during render. Only
+    /// synchronous state cells should override it. `waker` is the component's
+    /// wake proxy, to re-arm with if the change is consumed.
+    fn settle_render_phase_change(&mut self, _waker: &core::task::Waker) -> bool {
+        false
+    }
+
     /// Called before the component is updated.
     fn pre_component_update(&mut self, _updater: &mut ComponentUpdater) {}
 
@@ -63,6 +78,14 @@ impl Hook for Vec<Box<dyn AnyHook>> {
         } else {
             Poll::Pending
         }
+    }
+
+    fn settle_render_phase_change(&mut self, waker: &core::task::Waker) -> bool {
+        let mut settled = false;
+        for hook in self.iter_mut() {
+            settled |= hook.settle_render_phase_change(waker);
+        }
+        settled
     }
 
     fn pre_component_update(&mut self, updater: &mut ComponentUpdater) {
