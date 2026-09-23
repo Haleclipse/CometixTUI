@@ -20,8 +20,12 @@ use std::sync::{
 };
 use std::task::Wake;
 
-/// Opt-in gate for push-mode wake routing. Off by default while the harvest
-/// scan is validated A/B against the full-tree poll.
+/// Opt-in gate for push-mode wake routing (`IOCRAFT_PUSH_WAKE=1`). Still off
+/// by default: the CometixCode suite matches pull mode, but this crate's own
+/// suite has not — 12 component tests fail and one hangs under push mode
+/// (Memo stateful children, ScrollView drain / selection follow, ScrollBox
+/// drain, terminal viewport, OffscreenFreeze), and those need triage before
+/// the default can flip.
 pub(crate) fn push_wake_enabled() -> bool {
     #[cfg(test)]
     {

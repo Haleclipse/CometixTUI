@@ -725,10 +725,12 @@ struct DrawContext<'a> {
     prev_canvas: Option<&'a Canvas>,
 }
 
-/// Opt-in gate for the retained-blit draw fast path (B3-α). Off by default:
-/// the CC-parity mechanism (memo-retained subtree ⇒ cell-identical output ⇒
-/// blit from the previous canvas instead of re-drawing) is being validated
-/// A/B against the baseline full-traversal draw.
+/// Gate for the retained-blit draw fast path (B3-α): a memo-retained subtree
+/// is cell-identical to its last draw, so it is blitted from the previous
+/// canvas instead of re-drawn (CC Ink's clean-node blit). On by default since
+/// an A/B against the full-traversal draw showed no visible cell difference
+/// on a resumed 2M session (screen + scrollback, 13 interaction checkpoints);
+/// `IOCRAFT_RETAINED_BLIT=0` (or `false`) is the kill-switch.
 fn retained_blit_enabled() -> bool {
     #[cfg(test)]
     {
@@ -741,8 +743,8 @@ fn retained_blit_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("IOCRAFT_RETAINED_BLIT")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+            .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+            .unwrap_or(true)
     })
 }
 
