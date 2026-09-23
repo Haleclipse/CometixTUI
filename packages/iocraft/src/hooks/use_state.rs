@@ -100,14 +100,24 @@ impl<T: Unpin + Send + Sync + 'static> UseStateImpl<T> {
 impl<T: Unpin + Send + Sync + 'static> Hook for UseStateImpl<T> {
     fn poll_change(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         if let Ok(mut value) = self.state.inner.try_write() {
+            // Register-then-check: the waker is re-armed on the Ready path
+            // too. A consuming Ready that leaves the slot empty means the
+            // NEXT write has no waker to fire. Pull mode hid that (the next
+            // frame polls every hook anyway), but the push-wake harvest only
+            // re-polls components whose proxy actually fired, so an unarmed
+            // write strands its did_change forever — a second update-phase
+            // write after a settle pass deadlocked exactly this way.
+            value.waker = Some(cx.waker().clone());
             if value.did_change {
                 value.did_change = false;
                 Poll::Ready(())
             } else {
-                value.waker = Some(cx.waker().clone());
                 Poll::Pending
             }
         } else {
+            // Borrowed elsewhere: nothing was armed, so ask for a retry
+            // instead of relying on an unconditional next-frame poll.
+            cx.waker().wake_by_ref();
             Poll::Pending
         }
     }

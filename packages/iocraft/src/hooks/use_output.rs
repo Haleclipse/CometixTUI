@@ -590,8 +590,11 @@ impl Drop for UseOutputImpl {
 impl Hook for UseOutputImpl {
     fn poll_change(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
         let mut state = self.state.lock().unwrap();
+        // Register-then-check (see UseState::poll_change): the Ready path
+        // must stay armed so output queued after this frame's drain still
+        // wakes the component under push-wake harvesting.
+        state.waker = Some(cx.waker().clone());
         if state.queue.is_empty() {
-            state.waker = Some(cx.waker().clone());
             Poll::Pending
         } else {
             Poll::Ready(())

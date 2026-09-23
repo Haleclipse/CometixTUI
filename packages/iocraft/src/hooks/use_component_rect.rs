@@ -43,15 +43,16 @@ struct UseComponentRectImpl {
 
 impl Hook for UseComponentRectImpl {
     fn poll_change(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        // The change is detected in the draw phase where no Context is
+        // available; keep the waker armed (on the Ready path too — see
+        // UseState::poll_change) so `pre_component_draw` can wake instead of
+        // relying on an unconditional next-frame poll, which push-mode
+        // harvesting no longer performs for clean components.
+        self.waker = Some(cx.waker().clone());
         if self.is_changed {
             self.is_changed = false;
             Poll::Ready(())
         } else {
-            // The change is detected in the draw phase where no Context is
-            // available; stash the waker so `pre_component_draw` can wake
-            // instead of relying on an unconditional next-frame poll (which
-            // push-mode harvesting no longer performs for clean components).
-            self.waker = Some(cx.waker().clone());
             Poll::Pending
         }
     }

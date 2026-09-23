@@ -281,4 +281,44 @@ mod settle_tests {
             "expected settled iterations, got {n} loop iterations"
         );
     }
+
+    // Self-driving update-phase counter: every update bumps its own state
+    // until it exits. Under push-wake + settle, the second bump lands after a
+    // settle pass already consumed the first — it must still find an armed
+    // waker, or the component's dirty bit is never set and the loop parks
+    // forever (the W1.5 deadlock seen in five CometixCode tests).
+    #[component]
+    fn SelfDrivingApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut tick = hooks.use_state(|| 0u8);
+        if tick.get() < 4 {
+            tick += 1;
+        } else {
+            system.exit();
+        }
+        element!(Text(content: format!("tick {}", tick)))
+    }
+
+    #[apply(test!)]
+    async fn test_repeated_update_phase_writes_do_not_strand_under_push_wake() {
+        use futures::FutureExt;
+        super::set_push_wake_for_tests(Some(true));
+        let mut app = element!(SelfDrivingApp);
+        let frames = futures::future::select(
+            app.mock_terminal_render_loop(MockTerminalConfig::default())
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .boxed_local(),
+            smol::Timer::after(Duration::from_secs(5)),
+        )
+        .await;
+        super::set_push_wake_for_tests(None);
+        let frames = match frames {
+            futures::future::Either::Left((frames, _)) => frames,
+            futures::future::Either::Right(_) => {
+                panic!("render loop parked: an update-phase write found no armed waker")
+            }
+        };
+        assert!(frames.last().unwrap().contains("tick 4"));
+    }
 }
