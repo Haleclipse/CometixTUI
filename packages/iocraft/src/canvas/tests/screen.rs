@@ -809,6 +809,40 @@ fn test_cell_is_empty() {
 }
 
 #[test]
+fn test_overlay_and_no_select_rows_are_copy_on_write() {
+    use std::sync::Arc;
+    let mut canvas = Canvas::new(4, 3);
+    // A fresh canvas shares one blank template row per buffer: O(rows) to
+    // build, not O(cells).
+    assert!(Arc::ptr_eq(&canvas.overlays[0], &canvas.overlays[2]));
+    assert!(Arc::ptr_eq(&canvas.no_select[0], &canvas.no_select[2]));
+
+    canvas.set_overlay(1, 0, StyleOverlay::inverse());
+    canvas.mark_no_select_region(0, 2, 2, 1);
+    assert!(canvas.overlays[0][1].is_some());
+    assert!(
+        canvas.overlays[1][1].is_none(),
+        "writing row 0 must copy that row, not the shared template"
+    );
+    assert!(Arc::ptr_eq(&canvas.overlays[1], &canvas.overlays[2]));
+    assert!(canvas.is_no_select(0, 2) && !canvas.is_no_select(0, 1));
+
+    // A full-row blit shares the source rows; writing the copy leaves the
+    // source untouched.
+    let mut copy = Canvas::new(4, 3);
+    copy.blit_region_from(&canvas, 0, 0, 4, 3);
+    assert!(Arc::ptr_eq(&copy.overlays[0], &canvas.overlays[0]));
+    assert!(Arc::ptr_eq(&copy.no_select[2], &canvas.no_select[2]));
+    copy.clear_overlay(1, 0);
+    assert!(copy.overlays[0][1].is_none());
+    assert!(
+        canvas.overlays[0][1].is_some(),
+        "clearing the copy must not clear the shared source row"
+    );
+    assert!(canvas == canvas.clone(), "row sharing keeps equality intact");
+}
+
+#[test]
 fn test_cell_is_blank_matches_click_metadata_semantics() {
     let mut canvas = Canvas::new(5, 1);
     assert!(canvas.cell_is_blank(0, 0));

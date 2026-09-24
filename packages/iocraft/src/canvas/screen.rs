@@ -268,8 +268,14 @@ pub struct Canvas {
     /// previous per-cell deep clones dominated draw on multi-thousand-row
     /// inline sessions.
     pub(super) cells: Vec<std::sync::Arc<Vec<CanvasCell>>>,
-    pub(super) overlays: Vec<Vec<Option<StyleOverlay>>>,
-    pub(super) no_select: Vec<Vec<bool>>,
+    /// Same copy-on-write rows as `cells`: a new canvas shares one blank
+    /// template row, and `overlays_row_mut` / `no_select_row_mut` copy a row
+    /// only when it is first written. Before this, every frame allocated and
+    /// zero-filled one `Vec` per row for each of these — on a multi-thousand-row
+    /// inline canvas that was the whole `Canvas::new` cost, several megabytes
+    /// per frame for rows nothing would touch.
+    pub(super) overlays: Vec<std::sync::Arc<Vec<Option<StyleOverlay>>>>,
+    pub(super) no_select: Vec<std::sync::Arc<Vec<bool>>>,
     pub(super) soft_wrap: Vec<usize>,
     pub(super) cursor_declaration: Option<CursorDeclaration>,
     pub(super) scroll_hint: Option<ScrollHint>,
@@ -296,7 +302,12 @@ impl PartialEq for Canvas {
                 // Pointer-identical rows (shared blank template, baseline
                 // blits, canvas clones) compare equal without touching cells.
                 .all(|(a, b)| std::sync::Arc::ptr_eq(a, b) || a == b)
-            && self.overlays == other.overlays
+            && self.overlays.len() == other.overlays.len()
+            && self
+                .overlays
+                .iter()
+                .zip(&other.overlays)
+                .all(|(a, b)| std::sync::Arc::ptr_eq(a, b) || a == b)
             && self.cursor_declaration == other.cursor_declaration
     }
 }
@@ -454,11 +465,13 @@ impl Canvas {
     /// Constructs a new canvas with the given dimensions.
     pub fn new(width: usize, height: usize) -> Self {
         let blank_row = std::sync::Arc::new(vec![CanvasCell::default(); width]);
+        let blank_overlays = Self::blank_overlays_row(width);
+        let blank_no_select = Self::blank_no_select_row(width);
         Self {
             width,
             cells: vec![blank_row; height],
-            overlays: vec![vec![None; width]; height],
-            no_select: vec![vec![false; width]; height],
+            overlays: vec![blank_overlays; height],
+            no_select: vec![blank_no_select; height],
             soft_wrap: vec![0; height],
             cursor_declaration: None,
             scroll_hint: None,
@@ -488,6 +501,26 @@ impl Canvas {
         self.mark_rows_written(top, bottom);
     }
 
+    fn blank_overlays_row(width: usize) -> std::sync::Arc<Vec<Option<StyleOverlay>>> {
+        std::sync::Arc::new(vec![None; width])
+    }
+
+    fn blank_no_select_row(width: usize) -> std::sync::Arc<Vec<bool>> {
+        std::sync::Arc::new(vec![false; width])
+    }
+
+    /// Mutable access to a row's overlays, copy-on-write like `cells_row_mut`.
+    #[inline]
+    pub(super) fn overlays_row_mut(&mut self, y: usize) -> &mut Vec<Option<StyleOverlay>> {
+        std::sync::Arc::make_mut(&mut self.overlays[y])
+    }
+
+    /// Mutable access to a row's no-select flags, copy-on-write like `cells_row_mut`.
+    #[inline]
+    pub(super) fn no_select_row_mut(&mut self, y: usize) -> &mut Vec<bool> {
+        std::sync::Arc::make_mut(&mut self.no_select[y])
+    }
+
     /// Mutable access to a row's cells, copy-on-write. Shared rows (blank
     /// template, full-row blits, canvas clones) are deep-copied here, exactly
     /// once, when first written.
@@ -515,8 +548,8 @@ impl Canvas {
             return;
         }
 
-        for row in &mut self.no_select[top..bottom] {
-            row[left..right].fill(true);
+        for y in top..bottom {
+            self.no_select_row_mut(y)[left..right].fill(true);
         }
     }
 
@@ -1057,7 +1090,7 @@ impl Canvas {
                 && self.cells[row][x - 1].cell_width == CellWidth::Wide
             {
                 self.cells_row_mut(row)[x - 1] = CanvasCell::default();
-                self.overlays[row][x - 1] = None;
+                self.overlays_row_mut(row)[x - 1] = None;
                 damage_min_x = damage_min_x.min(x - 1);
             }
             if max_x < self.width
@@ -1065,7 +1098,7 @@ impl Canvas {
                 && self.cells[row][max_x].cell_width == CellWidth::WidthTail
             {
                 self.cells_row_mut(row)[max_x] = CanvasCell::default();
-                self.overlays[row][max_x] = None;
+                self.overlays_row_mut(row)[max_x] = None;
                 damage_max_x = damage_max_x.max(max_x + 1);
             }
 
@@ -1073,8 +1106,9 @@ impl Canvas {
             for col in x..max_x {
                 cells_row[col] = CanvasCell::default();
             }
+            let overlays_row = self.overlays_row_mut(row);
             for col in x..max_x {
-                self.overlays[row][col] = None;
+                overlays_row[col] = None;
             }
         }
 
@@ -1166,15 +1200,19 @@ impl Canvas {
         let full_row = x == 0 && max_x >= self.width && max_x >= src.width;
         for row in y..max_y {
             if full_row {
-                // Full-width copies share the source row instead of deep-
-                // cloning cell-by-cell (CanvasCell carries heap fields); the
+                // Full-width copies share the source rows instead of deep-
+                // cloning cell-by-cell (CanvasCell carries heap fields); a
                 // row is copied for real only if something later writes it.
                 self.cells[row] = std::sync::Arc::clone(&src.cells[row]);
+                self.overlays[row] = std::sync::Arc::clone(&src.overlays[row]);
+                self.no_select[row] = std::sync::Arc::clone(&src.no_select[row]);
             } else {
                 self.cells_row_mut(row)[x..max_x].clone_from_slice(&src.cells[row][x..max_x]);
+                self.overlays_row_mut(row)[x..max_x]
+                    .clone_from_slice(&src.overlays[row][x..max_x]);
+                self.no_select_row_mut(row)[x..max_x]
+                    .clone_from_slice(&src.no_select[row][x..max_x]);
             }
-            self.overlays[row][x..max_x].clone_from_slice(&src.overlays[row][x..max_x]);
-            self.no_select[row][x..max_x].clone_from_slice(&src.no_select[row][x..max_x]);
             self.soft_wrap[row] = src.soft_wrap[row];
         }
 
@@ -1187,7 +1225,7 @@ impl Canvas {
                         cell_width: CellWidth::WidthTail,
                         ..Default::default()
                     };
-                    self.overlays[row][max_x] = None;
+                    self.overlays_row_mut(row)[max_x] = None;
                     wrote_tail = true;
                 }
             }
@@ -1273,8 +1311,8 @@ impl Canvas {
         if abs_delta >= height {
             for y in top..=bottom {
                 self.cells[y] = std::sync::Arc::new(vec![CanvasCell::default(); self.width]);
-                self.overlays[y].fill(None);
-                self.no_select[y].fill(false);
+                self.overlays[y] = Self::blank_overlays_row(self.width);
+                self.no_select[y] = Self::blank_no_select_row(self.width);
                 self.soft_wrap[y] = 0;
             }
             return;
@@ -1289,8 +1327,8 @@ impl Canvas {
             }
             for y in bottom - abs_delta + 1..=bottom {
                 self.cells[y] = std::sync::Arc::new(vec![CanvasCell::default(); self.width]);
-                self.overlays[y].fill(None);
-                self.no_select[y].fill(false);
+                self.overlays[y] = Self::blank_overlays_row(self.width);
+                self.no_select[y] = Self::blank_no_select_row(self.width);
                 self.soft_wrap[y] = 0;
             }
         } else {
@@ -1302,8 +1340,8 @@ impl Canvas {
             }
             for y in top..top + abs_delta {
                 self.cells[y] = std::sync::Arc::new(vec![CanvasCell::default(); self.width]);
-                self.overlays[y].fill(None);
-                self.no_select[y].fill(false);
+                self.overlays[y] = Self::blank_overlays_row(self.width);
+                self.no_select[y] = Self::blank_no_select_row(self.width);
                 self.soft_wrap[y] = 0;
             }
         }
@@ -1836,7 +1874,7 @@ impl Canvas {
     /// cell. Callers do not need to know whether a cell is wide.
     pub fn set_overlay(&mut self, x: usize, y: usize, overlay: StyleOverlay) {
         self.mark_rows_written(y, y.saturating_add(1));
-        if let Some(row) = self.overlays.get_mut(y) {
+        if let Some(row) = self.overlays.get_mut(y).map(std::sync::Arc::make_mut) {
             if let Some(slot) = row.get_mut(x) {
                 Self::compose_overlay_slot(slot, overlay);
             }
@@ -1846,14 +1884,14 @@ impl Canvas {
             if let Some(cell) = cell_row.get(x) {
                 match cell.cell_width {
                     CellWidth::Wide => {
-                        if let Some(row) = self.overlays.get_mut(y) {
+                        if let Some(row) = self.overlays.get_mut(y).map(std::sync::Arc::make_mut) {
                             if let Some(slot) = row.get_mut(x + 1) {
                                 Self::compose_overlay_slot(slot, overlay);
                             }
                         }
                     }
                     CellWidth::WidthTail if x > 0 => {
-                        if let Some(row) = self.overlays.get_mut(y) {
+                        if let Some(row) = self.overlays.get_mut(y).map(std::sync::Arc::make_mut) {
                             if let Some(slot) = row.get_mut(x - 1) {
                                 Self::compose_overlay_slot(slot, overlay);
                             }
@@ -1876,7 +1914,7 @@ impl Canvas {
     ) {
         self.mark_rows_written(y, y.saturating_add(h));
         for row_idx in y..y + h {
-            if let Some(row) = self.overlays.get_mut(row_idx) {
+            if let Some(row) = self.overlays.get_mut(row_idx).map(std::sync::Arc::make_mut) {
                 for col_idx in x..x + w {
                     if let Some(slot) = row.get_mut(col_idx) {
                         Self::compose_overlay_slot(slot, overlay);
@@ -1889,7 +1927,7 @@ impl Canvas {
     /// Clears the overlay on a single cell.
     pub fn clear_overlay(&mut self, x: usize, y: usize) {
         self.mark_rows_written(y, y.saturating_add(1));
-        if let Some(row) = self.overlays.get_mut(y) {
+        if let Some(row) = self.overlays.get_mut(y).map(std::sync::Arc::make_mut) {
             if let Some(slot) = row.get_mut(x) {
                 *slot = None;
             }
@@ -1900,8 +1938,9 @@ impl Canvas {
     pub fn clear_overlays(&mut self) {
         let height = self.dirty_rows.len();
         self.mark_rows_written(0, height);
+        let blank = Self::blank_overlays_row(self.width);
         for row in &mut self.overlays {
-            row.fill(None);
+            *row = std::sync::Arc::clone(&blank);
         }
     }
 

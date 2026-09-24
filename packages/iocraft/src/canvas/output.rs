@@ -274,9 +274,9 @@ impl CanvasSubviewMut<'_> {
 
             self.canvas.cells_row_mut(dst_row)[dst_left..dst_right]
                 .clone_from_slice(&src.cells[src_row][src_left..src_right]);
-            self.canvas.overlays[dst_row][dst_left..dst_right]
+            self.canvas.overlays_row_mut(dst_row)[dst_left..dst_right]
                 .clone_from_slice(&src.overlays[src_row][src_left..src_right]);
-            self.canvas.no_select[dst_row][dst_left..dst_right]
+            self.canvas.no_select_row_mut(dst_row)[dst_left..dst_right]
                 .clone_from_slice(&src.no_select[src_row][src_left..src_right]);
 
             let src_soft_wrap = src.soft_wrap[src_row];
@@ -300,7 +300,7 @@ impl CanvasSubviewMut<'_> {
                     cell_width: CellWidth::WidthTail,
                     ..Default::default()
                 };
-                self.canvas.overlays[dst_row][dst_right] = None;
+                self.canvas.overlays_row_mut(dst_row)[dst_right] = None;
                 damage_width = damage_width.max(copy_width + 1);
             }
         }
