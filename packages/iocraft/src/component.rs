@@ -5,7 +5,7 @@ use crate::{
     multimap::RemoveOnlyMultimap,
     props::{AnyProps, Props},
     render::{
-        wake::{push_wake_enabled, ComponentWakeState},
+        wake::{push_wake_enabled, settle_trace_enabled, ComponentWakeState},
         ComponentDrawer, ComponentUpdater, UpdateContext,
     },
 };
@@ -341,6 +341,15 @@ impl InstantiatedComponent {
         {
             self.pending_change = true;
             settled = true;
+            if settle_trace_enabled() {
+                // Which component wrote state during render: the settle pass
+                // re-runs the update for it, so every entry here is one more
+                // update per frame. Attribution for migrating such writes.
+                eprintln!(
+                    "iocraft-settle component={}",
+                    self.helper.component_type_name()
+                );
+            }
         }
         for child in self.children.components.iter_mut() {
             if child.settle_render_phase() {

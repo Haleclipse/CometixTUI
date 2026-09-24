@@ -133,6 +133,10 @@ impl<T: Unpin + Send + Sync + 'static> Hook for UseStateImpl<T> {
         value.waker = Some(waker.clone());
         std::mem::take(&mut value.did_change)
     }
+
+    fn settle_trace_name(&self) -> Option<&'static str> {
+        Some(core::any::type_name::<T>())
+    }
 }
 
 

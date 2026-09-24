@@ -56,6 +56,18 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
+/// `IOCRAFT_SETTLE_TRACE=1`: print the type name of every component whose
+/// render-phase state write makes the settle pass re-run the update. Each
+/// line is one extra update per frame for that component's subtree.
+pub(crate) fn settle_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("IOCRAFT_SETTLE_TRACE")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn set_push_wake_for_tests(enabled: Option<bool>) {
     PUSH_WAKE_TEST_OVERRIDE.with(|cell| {

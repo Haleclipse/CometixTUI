@@ -32,6 +32,12 @@ pub trait Hook: Unpin + Send {
         false
     }
 
+    /// Name shown by `IOCRAFT_SETTLE_TRACE` when this hook reports a
+    /// render-phase change; state cells return their value type.
+    fn settle_trace_name(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Called before the component is updated.
     fn pre_component_update(&mut self, _updater: &mut ComponentUpdater) {}
 
@@ -82,8 +88,19 @@ impl Hook for Vec<Box<dyn AnyHook>> {
 
     fn settle_render_phase_change(&mut self, waker: &core::task::Waker) -> bool {
         let mut settled = false;
-        for hook in self.iter_mut() {
-            settled |= hook.settle_render_phase_change(waker);
+        for (index, hook) in self.iter_mut().enumerate() {
+            if hook.settle_render_phase_change(waker) {
+                settled = true;
+                if crate::render::wake::settle_trace_enabled() {
+                    // Hook slot index in call order plus the state's value
+                    // type: enough to find the `use_state` that was written
+                    // during render.
+                    eprintln!(
+                        "iocraft-settle-hook #{index} {}",
+                        hook.settle_trace_name().unwrap_or("?")
+                    );
+                }
+            }
         }
         settled
     }
