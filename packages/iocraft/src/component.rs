@@ -229,7 +229,7 @@ impl InstantiatedComponent {
         self.helper.update_component(
             &mut self.component,
             props,
-            Hooks::new(&mut self.hooks, self.first_update),
+            Hooks::new(&mut self.hooks, self.first_update, Some(&self.proxy_waker)),
             &mut updater,
         );
         self.hooks.post_component_update(&mut updater);

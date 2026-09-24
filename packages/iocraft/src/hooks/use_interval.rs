@@ -64,6 +64,13 @@ impl UseInterval for Hooks<'_, '_> {
         }
         hook.interval = interval;
         hook.callback = Some(callback);
+        // The `Delay` is created and its waker armed in `poll_change`. A
+        // render that (re)starts the interval has to be followed by one poll,
+        // or a push-mode component nobody else wakes never sees its timer.
+        let needs_arm = interval.is_some() && hook.delay.is_none();
+        if needs_arm {
+            self.request_poll();
+        }
     }
 
     fn use_animation_timer_opt(&mut self, interval: Option<Duration>) -> u128 {
@@ -235,5 +242,52 @@ mod tests {
             late > 0,
             "late-mounted animation timers should inherit the shared clock instead of restarting at 0: {rendered:?}"
         );
+    }
+
+    // An interval that is paused on the first render and started by a later
+    // one. A component's first poll arms whatever its hooks wait for; a hook
+    // that only begins waiting after a later render has to ask for that poll
+    // itself (`Hooks::request_poll`), or under push-mode wake routing nothing
+    // polls it and the timer never fires (the ScrollView drain hang).
+    #[component]
+    fn LateStartInterval(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let armed = hooks.use_state(|| false);
+        let count = hooks.use_state(|| 0u8);
+        let mut armed_for_future = armed;
+        hooks.use_future(async move {
+            armed_for_future.set(true);
+        });
+        let mut count_for_interval = count;
+        hooks.use_interval(
+            move || count_for_interval += 1,
+            armed.get().then_some(Duration::from_millis(1)),
+        );
+        if count.get() >= 2 {
+            system.exit();
+        }
+        element!(Text(content: format!("armed={} count={}", armed.get(), count.get())))
+    }
+
+    #[test]
+    fn test_interval_started_by_a_later_render_fires_under_push_wake() {
+        use futures::FutureExt;
+        crate::render::wake::set_push_wake_for_tests(Some(true));
+        let mut app = element!(LateStartInterval);
+        let frames = smol::block_on(futures::future::select(
+            app.mock_terminal_render_loop(MockTerminalConfig::default())
+                .map(|canvas| canvas.to_string())
+                .collect::<Vec<_>>()
+                .boxed_local(),
+            smol::Timer::after(Duration::from_secs(5)),
+        ));
+        crate::render::wake::set_push_wake_for_tests(None);
+        let frames = match frames {
+            futures::future::Either::Left((frames, _)) => frames,
+            futures::future::Either::Right(_) => {
+                panic!("render loop parked: an interval started by a later render was never polled")
+            }
+        };
+        assert_eq!(frames.last().unwrap(), "armed=true count=2\n");
     }
 }

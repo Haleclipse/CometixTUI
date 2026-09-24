@@ -2,7 +2,7 @@ use crate::{ComponentDrawer, ComponentUpdater, ContextStack};
 use core::{
     any::Any,
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
 
 /// A hook is a way to add behavior to a component. Hooks are called at various points in the
@@ -128,15 +128,24 @@ pub struct Hooks<'a, 'b: 'a> {
     first_update: bool,
     hook_index: usize,
     pub(crate) context_stack: Option<&'a ContextStack<'b>>,
+    // The owning component's wake proxy, so a hook reconfigured during render
+    // can ask for one poll of this component's hooks. `None` only for hook
+    // collections built outside a component update.
+    waker: Option<&'a Waker>,
 }
 
 impl<'a> Hooks<'a, '_> {
-    pub(crate) fn new(hooks: &'a mut Vec<Box<dyn AnyHook>>, first_update: bool) -> Self {
+    pub(crate) fn new(
+        hooks: &'a mut Vec<Box<dyn AnyHook>>,
+        first_update: bool,
+        waker: Option<&'a Waker>,
+    ) -> Self {
         Self {
             hooks,
             first_update,
             hook_index: 0,
             context_stack: None,
+            waker,
         }
     }
 
@@ -150,6 +159,25 @@ impl<'a> Hooks<'a, '_> {
             first_update: self.first_update,
             hook_index: self.hook_index,
             context_stack: Some(context_stack),
+            waker: self.waker,
+        }
+    }
+
+    /// Schedules one [`Hook::poll_change`] pass over this component's hooks
+    /// after the current render.
+    ///
+    /// A hook re-arms the wakers it depends on inside `poll_change`, but its
+    /// configuration is written during render. When a render changes what a
+    /// hook waits for (an interval that was paused and is now running, a timer
+    /// whose period changed), the hook must be polled once more before that
+    /// new interest is registered — otherwise, under push-mode wake routing,
+    /// nothing wakes the component and the hook never fires. This is the
+    /// `Waker` contract applied to render-time reconfiguration: "poll me
+    /// again". In pull mode every frame polls everything, so the call is a
+    /// no-op there.
+    pub fn request_poll(&self) {
+        if let Some(waker) = self.waker {
+            waker.wake_by_ref();
         }
     }
 
