@@ -369,7 +369,26 @@ impl InstantiatedComponent {
             if push_wake_enabled() {
                 self_mut.wake_state.root().waker.register(cx.waker());
             }
-            self_mut.as_mut().poll_change(cx)
+            let status = self_mut.as_mut().poll_change(cx);
+            // Drain the wakes that landed during this pass before rendering.
+            // Hooks are polled in order, children before their parent, so a
+            // callback run late in the pass (a terminal event handler) that
+            // writes state polled earlier — its own component's, or its
+            // parent's through a handler — leaves those writes unconsumed
+            // while the pass still reports Ready through a later hook.
+            // Rendering now would let the settle pass mistake them for
+            // render-phase writes and re-run the whole update. Re-harvest the
+            // dirty paths first, as React batches every setState of one event
+            // before rendering. Bounded, so a hook that wakes itself on every
+            // poll cannot spin here.
+            if status.is_ready() && push_wake_enabled() {
+                let mut drains = 0;
+                while drains < 2 && self_mut.wake_state.is_subtree_dirty() {
+                    let _ = self_mut.as_mut().poll_change(cx);
+                    drains += 1;
+                }
+            }
+            status
         })
         .await;
     }

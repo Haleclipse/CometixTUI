@@ -361,6 +361,100 @@ mod settle_tests {
         );
     }
 
+    #[derive(Default, Props)]
+    struct EchoChildProps {
+        on_key: Handler<u8>,
+    }
+
+    // A key handler that writes its own state — declared before the event
+    // hook, so already polled this pass — and, through a handler, its
+    // parent's state, which is polled after the child. The pass reports
+    // Ready via the parent; the child's write is stranded unless the loop
+    // drains wakes before rendering, and would then be consumed by the settle
+    // pass as if it were a render-phase write.
+    #[component]
+    fn EchoChild(mut hooks: Hooks, props: &EchoChildProps) -> impl Into<AnyElement<'static>> {
+        let own = hooks.use_state(|| 0u8);
+        let on_key = props.on_key.clone();
+        hooks.use_terminal_events(move |event| {
+            if let TerminalEvent::Key(_) = event {
+                let mut own = own;
+                own.set(own.get() + 1);
+                on_key(own.get());
+            }
+        });
+        element!(Text(content: format!("own={}", own.get())))
+    }
+
+    #[component]
+    fn EchoParentApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        // The parent listens to keys too (as an app shell does), so the key
+        // wakes it as well: dirty at pass entry, its hooks are polled after
+        // the child's and see the child's write to `mirrored` — the pass
+        // reports Ready without ever re-polling the child's own state.
+        hooks.use_terminal_events(|_| {});
+        let mirrored = hooks.use_state(|| 0u8);
+        let mirrored_for_child = mirrored;
+        // Exit from a timer, not from the key frames: an exit during update
+        // ends the frame early, and the key frames are the ones under test.
+        let done = hooks.use_state(|| false);
+        let mut done_for_future = done;
+        hooks.use_future(async move {
+            smol::Timer::after(Duration::from_millis(150)).await;
+            done_for_future.set(true);
+        });
+        if done.get() {
+            system.exit();
+        }
+        element! {
+            View(flex_direction: FlexDirection::Column) {
+                EchoChild(on_key: move |count: u8| {
+                    let mut mirrored = mirrored_for_child;
+                    mirrored.set(count);
+                })
+                Text(content: format!("mirrored={}", mirrored.get()))
+            }
+        }
+    }
+
+    #[apply(test!)]
+    async fn test_event_writes_are_drained_before_rendering_under_push_wake() {
+        use std::sync::{Arc, Mutex};
+        super::set_push_wake_for_tests(Some(true));
+        let rounds = Arc::new(Mutex::new(Vec::new()));
+        let rounds_cb = Arc::clone(&rounds);
+        // One key per frame: spaced out so each lands in its own poll pass.
+        let keys = futures::stream::unfold(0u8, |sent| async move {
+            if sent >= 3 {
+                return None;
+            }
+            smol::Timer::after(Duration::from_millis(20)).await;
+            Some((
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('a'))),
+                sent + 1,
+            ))
+        });
+        let frames = element!(EchoParentApp)
+            .mock_terminal_render_loop_with_profile(
+                MockTerminalConfig::with_events(keys),
+                move |event| rounds_cb.lock().unwrap().push(event.phases.settle_rounds),
+            )
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .await;
+        super::set_push_wake_for_tests(None);
+        assert!(
+            frames.last().unwrap().contains("mirrored=3"),
+            "{frames:?}"
+        );
+        let rounds = rounds.lock().unwrap().clone();
+        assert!(
+            rounds.iter().all(|&r| r == 0),
+            "event-phase writes reached the settle pass: settle rounds per frame = {rounds:?}"
+        );
+    }
+
     // Self-driving update-phase counter: every update bumps its own state
     // until it exits. Under push-wake + settle, the second bump lands after a
     // settle pass already consumed the first — it must still find an armed
