@@ -14,10 +14,13 @@ fn MyInnerComponent(
     mut hooks: Hooks,
     props: &MyInnerComponentProps,
 ) -> impl Into<AnyElement<'static>> {
-    let mut counter = hooks.use_state(|| 0);
-    counter += 1;
+    // Count renders without scheduling one: a `State` bumped during render is
+    // a render-phase update, which push-mode settle re-runs inside the same
+    // frame (React rejects it outright). `Ref` records without waking.
+    let mut counter = hooks.use_ref(|| 0);
+    counter.set(counter.get() + 1);
     element! {
-        Text(content: format!("render count ({}): {}", props.label, counter))
+        Text(content: format!("render count ({}): {}", props.label, counter.get()))
     }
 }
 

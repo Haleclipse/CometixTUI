@@ -3421,7 +3421,7 @@ mod tests {
     fn ScrollViewSelectionFollowApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let mut system = hooks.use_context_mut::<SystemContext>();
         let selection = create_selection_context(&mut hooks);
-        let mut rows = hooks.use_state(|| 3usize);
+        let rows = hooks.use_state(|| 3usize);
         let copied = hooks.use_state(String::new);
 
         if !selection.has_selection() && copied.read().is_empty() {
@@ -3433,9 +3433,15 @@ mod tests {
         }
 
         let row_count = rows.get();
-        if row_count == 3 {
-            rows.set(4);
-        }
+        // Grow the content from outside the render: the follow-scroll
+        // translation keys off the *drawn* content height changing, so the
+        // three-row layout must reach a draw before the fourth row lands. A
+        // render-phase `rows.set(4)` never draws at three rows under push-mode
+        // settle.
+        let mut rows_for_growth = rows;
+        hooks.use_future(async move {
+            rows_for_growth.set(4);
+        });
 
         let mut copied_for_callback = copied;
         hooks.use_copy_on_select_text(selection, row_count > 3, move |text| {

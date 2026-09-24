@@ -1,13 +1,16 @@
 //! Push-mode wake routing for the component tree (dirty-path rendering, Phase W).
 //!
-//! In pull mode (the default), every frame re-polls every component's hooks so
-//! each hook re-registers the render loop's waker — O(tree) work per frame even
-//! when nothing changed. In push mode (`IOCRAFT_PUSH_WAKE=1`), each component
+//! In pull mode (`IOCRAFT_PUSH_WAKE=0`), every frame re-polls every component's
+//! hooks so each hook re-registers the render loop's waker — O(tree) work per
+//! frame even when nothing changed. In push mode (the default), each component
 //! polls its own hooks through a per-component proxy waker: a wake marks that
 //! component dirty *and* wakes the render loop, so the next frame's poll pass
 //! can skip every non-dirty component with a single atomic read — their hook
 //! wakers are still armed from the last poll, and the `Future` contract
-//! guarantees any change will fire them.
+//! guarantees any change will fire them. A hook whose interest set changes
+//! during render (an interval starting, a period changing) asks for one more
+//! poll through [`crate::Hooks::request_poll`], which is the same contract
+//! applied to render-time reconfiguration.
 //!
 //! Design doc: CometixCode `docs/IOCRAFT_DIRTY_PATH_RENDER_DESIGN_2026-09-23.md`
 //! (Phase W). The React analogue is `setState` scheduling work on the fiber
@@ -20,12 +23,12 @@ use std::sync::{
 };
 use std::task::Wake;
 
-/// Opt-in gate for push-mode wake routing (`IOCRAFT_PUSH_WAKE=1`). Still off
-/// by default: the CometixCode suite matches pull mode, but this crate's own
-/// suite has not — 12 component tests fail and one hangs under push mode
-/// (Memo stateful children, ScrollView drain / selection follow, ScrollBox
-/// drain, terminal viewport, OffscreenFreeze), and those need triage before
-/// the default can flip.
+/// Gate for push-mode wake routing. On by default; `IOCRAFT_PUSH_WAKE=0` (or
+/// `false`) restores pull mode as a kill-switch. Both this crate's suite and
+/// CometixCode's pass under either mode: the tests that had depended on pull
+/// mode's frame cadence (a `State` bumped during render committing as its own
+/// frame, a passive component being polled every frame) were rewritten to be
+/// wake-mode independent before the default flipped.
 pub(crate) fn push_wake_enabled() -> bool {
     #[cfg(test)]
     {
@@ -38,15 +41,15 @@ pub(crate) fn push_wake_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("IOCRAFT_PUSH_WAKE")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+            .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+            .unwrap_or(true)
     })
 }
 
-/// 0 = no override, 1 = forced off, 2 = forced on. Thread-local (not a
-/// process-wide atomic): the mock render loop runs on the test's own thread,
-/// so a thread-local override flips the gate for exactly that test while
-/// parallel frame-cadence-sensitive tests keep the default behavior.
+// 0 = no override, 1 = forced off, 2 = forced on. Thread-local (not a
+// process-wide atomic): the mock render loop runs on the test's own thread,
+// so a thread-local override flips the gate for exactly that test while
+// parallel frame-cadence-sensitive tests keep the default behavior.
 #[cfg(test)]
 thread_local! {
     pub(crate) static PUSH_WAKE_TEST_OVERRIDE: std::cell::Cell<u8> =

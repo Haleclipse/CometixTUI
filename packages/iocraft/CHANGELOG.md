@@ -10,8 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - *(terminal)* support opt-in bracketed paste events in raw mode.
+- *(hooks)* `Hooks::request_poll` schedules one `poll_change` pass over the component's hooks after the current render. Custom hooks that change what they wait for during render (a timer that starts or changes period) must call it; `use_interval` does.
 
 ### Changed
+
+- *(render)* push-mode wake routing is now the default: each component polls its hooks through its own proxy waker and a frame's poll pass skips every component that was not woken, and render-phase state writes settle inside the frame that made them instead of committing as their own frame. `IOCRAFT_PUSH_WAKE=0` restores the previous poll-everything behavior. Tests that bump a `State` during render as a frame clock, or count renders in a `State`, will see fewer frames; tick from `use_interval` / `use_future` and count in a `Ref` instead.
 
 - *(hooks)* [**breaking**] `use_terminal_title` is now effect-driven like CC Ink's `useTerminalTitle`: the title is written only on the render pass where it changes, instead of on every render-loop iteration. Rewriting an unchanged title made Termux scroll back to the bottom whenever an idle app re-rendered. `SystemContext::set_terminal_title` has been removed; use the hook.
 - *(terminal)* the title is delivered by the terminal backend: OSC 0 with the shared Kitty ST / BEL terminator policy on Unix-likes, and crossterm's `SetTitle` on Windows so legacy conhost without VT support still receives `SetConsoleTitleW`.

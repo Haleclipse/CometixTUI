@@ -189,26 +189,46 @@ impl Component for OffscreenFreeze {
 mod tests {
     use crate::prelude::*;
     use core::{
+        future::Future,
         pin::Pin,
         task::{Context as TaskContext, Poll},
     };
     use futures::StreamExt;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use futures_timer::Delay;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+
+    /// Frame clock for the apps below: advances once per frame, from outside
+    /// the render. Bumping a `State` during render is a render-phase update —
+    /// pull mode happens to commit each step as its own frame, push-mode
+    /// settle folds it into the frame that wrote it — so a clock whose every
+    /// step must reach a draw has to tick between frames. Returns the tick
+    /// visible to this render.
+    fn use_frame_clock(hooks: &mut Hooks) -> u8 {
+        let tick = hooks.use_state(|| 0u8);
+        let mut tick_for_interval = tick;
+        hooks.use_interval(
+            move || tick_for_interval.set(tick_for_interval.get().saturating_add(1)),
+            Some(Duration::from_millis(1)),
+        );
+        tick.get()
+    }
 
     #[component]
     fn CountingChild(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-        let mut renders = hooks.use_state(|| 0u32);
-        renders += 1;
+        // A render counter must not schedule renders; `Ref` records without
+        // waking, so the count is the same under both wake modes.
+        let mut renders = hooks.use_ref(|| 0u32);
+        renders.set(renders.get() + 1);
         element!(Text(content: format!("child renders={}", renders.get())))
     }
 
     #[component]
     fn FreezeApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let mut system = hooks.use_context_mut::<SystemContext>();
-        let mut tick = hooks.use_state(|| 0u8);
-        if tick.get() < 3 {
-            tick += 1;
-        } else {
+        if use_frame_clock(&mut hooks) >= 3 {
             system.exit();
         }
 
@@ -245,10 +265,7 @@ mod tests {
     #[component]
     fn VirtualFreezeApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let mut system = hooks.use_context_mut::<SystemContext>();
-        let mut tick = hooks.use_state(|| 0u8);
-        if tick.get() < 3 {
-            tick += 1;
-        } else {
+        if use_frame_clock(&mut hooks) >= 3 {
             system.exit();
         }
 
@@ -285,22 +302,31 @@ mod tests {
     }
 
     static DEFAULT_POLL_CHILD_POLLS: AtomicUsize = AtomicUsize::new(0);
+    static DEFAULT_POLL_CHILD_POLLS_WHEN_FROZEN: AtomicUsize = AtomicUsize::new(0);
     static SKIP_POLL_CHILD_POLLS: AtomicUsize = AtomicUsize::new(0);
+    static SKIP_POLL_CHILD_POLLS_WHEN_FROZEN: AtomicUsize = AtomicUsize::new(0);
     static VIRTUAL_POLL_CHILD_POLLS: AtomicUsize = AtomicUsize::new(0);
 
     #[derive(Default, Props)]
     struct PollingChildProps;
 
+    // Counts polls while behaving like a live hook: it re-arms a timer on every
+    // poll so the component keeps asking to be polled. Under push-mode wake
+    // routing a component that never wakes is never polled again, so a passive
+    // counter would read 1 in every scenario and prove nothing about
+    // `skip_poll`.
     macro_rules! polling_child {
         ($name:ident, $counter:ident) => {
             #[derive(Default)]
-            struct $name;
+            struct $name {
+                delay: Option<Pin<Box<Delay>>>,
+            }
 
             impl Component for $name {
                 type Props<'a> = PollingChildProps;
 
                 fn new(_props: &Self::Props<'_>) -> Self {
-                    Self
+                    Self::default()
                 }
 
                 fn update(
@@ -315,9 +341,16 @@ mod tests {
                     );
                 }
 
-                fn poll_change(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<()> {
-                    let _ = self;
+                fn poll_change(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<()> {
+                    let this = self.get_mut();
                     $counter.fetch_add(1, Ordering::SeqCst);
+                    let delay = this
+                        .delay
+                        .get_or_insert_with(|| Box::pin(Delay::new(Duration::from_millis(1))));
+                    if delay.as_mut().poll(cx).is_ready() {
+                        this.delay = None;
+                        cx.waker().wake_by_ref();
+                    }
                     Poll::Pending
                 }
             }
@@ -331,10 +364,14 @@ mod tests {
     #[component]
     fn DefaultPollFreezeApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let mut system = hooks.use_context_mut::<SystemContext>();
-        let mut tick = hooks.use_state(|| 0u8);
-        if tick.get() < 4 {
-            tick += 1;
-        } else {
+        let tick = use_frame_clock(&mut hooks);
+        // Frame 1 draws the wrapper offscreen; frame 2's update sees `frozen`.
+        // By this render the freeze has been in effect for a whole wait.
+        if tick == 2 {
+            DEFAULT_POLL_CHILD_POLLS_WHEN_FROZEN
+                .store(DEFAULT_POLL_CHILD_POLLS.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+        if tick >= 4 {
             system.exit();
         }
 
@@ -357,10 +394,12 @@ mod tests {
     #[component]
     fn SkipPollFreezeApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let mut system = hooks.use_context_mut::<SystemContext>();
-        let mut tick = hooks.use_state(|| 0u8);
-        if tick.get() < 4 {
-            tick += 1;
-        } else {
+        let tick = use_frame_clock(&mut hooks);
+        if tick == 2 {
+            SKIP_POLL_CHILD_POLLS_WHEN_FROZEN
+                .store(SKIP_POLL_CHILD_POLLS.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+        if tick >= 4 {
             system.exit();
         }
 
@@ -383,7 +422,9 @@ mod tests {
     #[test]
     fn test_offscreen_freeze_skip_poll_is_opt_in() {
         DEFAULT_POLL_CHILD_POLLS.store(0, Ordering::SeqCst);
+        DEFAULT_POLL_CHILD_POLLS_WHEN_FROZEN.store(0, Ordering::SeqCst);
         SKIP_POLL_CHILD_POLLS.store(0, Ordering::SeqCst);
+        SKIP_POLL_CHILD_POLLS_WHEN_FROZEN.store(0, Ordering::SeqCst);
 
         let _: Vec<_> = smol::block_on(
             element!(DefaultPollFreezeApp)
@@ -398,27 +439,29 @@ mod tests {
                 .collect(),
         );
         let skip_polls = SKIP_POLL_CHILD_POLLS.load(Ordering::SeqCst);
+        let default_frozen = DEFAULT_POLL_CHILD_POLLS_WHEN_FROZEN.load(Ordering::SeqCst);
+        let skip_frozen = SKIP_POLL_CHILD_POLLS_WHEN_FROZEN.load(Ordering::SeqCst);
 
         assert!(
-            default_polls > skip_polls,
-            "default frozen children should keep polling unless skip_poll is opted in: default={default_polls}, skip={skip_polls}"
+            default_polls > default_frozen,
+            "default frozen children should keep polling unless skip_poll is opted in: frozen={default_frozen}, final={default_polls}"
         );
         assert!(
-            skip_polls <= 1,
-            "skip_poll should stop child polling after the wrapper has frozen: {skip_polls}"
+            skip_frozen >= 1 && skip_polls == skip_frozen,
+            "skip_poll should stop child polling after the wrapper has frozen: frozen={skip_frozen}, final={skip_polls}"
         );
     }
 
     #[component]
     fn ThawingSkipPollFreezeApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let mut system = hooks.use_context_mut::<SystemContext>();
-        let mut tick = hooks.use_state(|| 0u8);
-        if tick.get() < 5 {
-            tick += 1;
-        } else {
+        let tick = use_frame_clock(&mut hooks);
+        if tick >= 5 {
             system.exit();
         }
-        let terminal_rows = if tick.get() < 3 { 3 } else { 20 };
+        // Offscreen for the first two frames (frame 1 draws it out of the
+        // viewport, frame 2 runs frozen), then a tall viewport thaws it.
+        let terminal_rows = if tick < 2 { 3 } else { 20 };
 
         element! {
             View(flex_direction: FlexDirection::Column) {
@@ -453,10 +496,7 @@ mod tests {
     #[component]
     fn VirtualSkipPollFreezeApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let mut system = hooks.use_context_mut::<SystemContext>();
-        let mut tick = hooks.use_state(|| 0u8);
-        if tick.get() < 4 {
-            tick += 1;
-        } else {
+        if use_frame_clock(&mut hooks) >= 4 {
             system.exit();
         }
 

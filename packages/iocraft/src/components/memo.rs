@@ -294,6 +294,8 @@ mod tests {
         );
     }
 
+    static PULSE_RENDERED: AtomicUsize = AtomicUsize::new(0);
+
     #[component]
     fn PulsingChild(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let pulse = hooks.use_state(|| 0u8);
@@ -304,18 +306,30 @@ mod tests {
                     pulse_for_interval += 1;
                 }
             },
-            Some(Duration::from_millis(0)),
+            Some(Duration::from_millis(1)),
         );
+        // Published from the render, not the timer callback: the parent must
+        // only exit once this value has reached the canvas, or a stable memo
+        // key can leave the last frame one pulse behind.
+        PULSE_RENDERED.store(pulse.get() as usize, Ordering::SeqCst);
         element!(Text(content: format!("pulse={}", pulse.get())))
     }
 
     #[component]
     fn StatefulChildMemoApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let mut system = hooks.use_context_mut::<SystemContext>();
-        let mut tick = hooks.use_state(|| 0u8);
-        if tick.get() < 8 {
-            tick += 1;
-        } else {
+        // The parent keeps re-rendering on its own clock while the memo key
+        // stays stable. The clock ticks from outside the render (a render-phase
+        // bump is folded into one frame by push-mode settle), and the app only
+        // exits once the child has rendered its final pulse, so the assertion
+        // never races the two timers.
+        let tick = hooks.use_state(|| 0u8);
+        let mut tick_for_interval = tick;
+        hooks.use_interval(
+            move || tick_for_interval.set(tick_for_interval.get().saturating_add(1)),
+            Some(Duration::from_millis(1)),
+        );
+        if tick.get() >= 8 && PULSE_RENDERED.load(Ordering::SeqCst) >= 3 {
             system.exit();
         }
 
@@ -328,6 +342,7 @@ mod tests {
 
     #[test]
     fn test_memo_does_not_skip_stateful_child_changes() {
+        PULSE_RENDERED.store(0, Ordering::SeqCst);
         let canvases: Vec<_> = smol::block_on(
             element!(StatefulChildMemoApp)
                 .mock_terminal_render_loop(MockTerminalConfig::default())

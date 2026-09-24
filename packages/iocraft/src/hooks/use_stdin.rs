@@ -155,12 +155,13 @@ mod tests {
                 .collect(),
         );
 
+        // The mock terminal reports raw-mode status from the first post-update
+        // pass. Pull mode also commits the frame rendered before that pass;
+        // push-mode settle folds the post-update state write into the first
+        // frame. Only the settled status is the contract.
         assert_eq!(
-            canvases.iter().map(Canvas::to_string).collect::<Vec<_>>(),
-            vec![
-                "supported=false enabled=false exit_on_ctrl_c=true\n".to_string(),
-                "supported=true enabled=true exit_on_ctrl_c=true\n".to_string(),
-            ]
+            canvases.last().map(Canvas::to_string),
+            Some("supported=true enabled=true exit_on_ctrl_c=true\n".to_string())
         );
     }
 
@@ -173,11 +174,8 @@ mod tests {
         );
 
         assert_eq!(
-            canvases.iter().map(Canvas::to_string).collect::<Vec<_>>(),
-            vec![
-                "supported=false enabled=false exit_on_ctrl_c=false\n".to_string(),
-                "supported=true enabled=true exit_on_ctrl_c=false\n".to_string(),
-            ]
+            canvases.last().map(Canvas::to_string),
+            Some("supported=true enabled=true exit_on_ctrl_c=false\n".to_string())
         );
     }
 

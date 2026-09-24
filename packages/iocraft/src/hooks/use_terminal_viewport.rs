@@ -90,6 +90,7 @@ mod tests {
     use super::*;
     use crate::prelude::*;
     use futures::StreamExt;
+    use std::time::Duration;
 
     #[component]
     fn TopProbe(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -106,10 +107,16 @@ mod tests {
     #[component]
     fn ViewportProbeApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let mut system = hooks.use_context_mut::<SystemContext>();
-        let mut tick = hooks.use_state(|| 0u8);
-        if tick.get() < 2 {
-            tick += 1;
-        } else {
+        // Tick from outside the render so every frame is drawn before the
+        // next render reads the draw-time viewport entry. A render-phase bump
+        // is folded into one frame by push-mode settle, before any draw.
+        let tick = hooks.use_state(|| 0u8);
+        let mut tick_for_interval = tick;
+        hooks.use_interval(
+            move || tick_for_interval.set(tick_for_interval.get().saturating_add(1)),
+            Some(Duration::from_millis(1)),
+        );
+        if tick.get() >= 2 {
             system.exit();
         }
 
