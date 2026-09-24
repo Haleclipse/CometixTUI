@@ -5,7 +5,7 @@ use crate::{
     multimap::RemoveOnlyMultimap,
     props::{AnyProps, Props},
     render::{
-        wake::{push_wake_enabled, ComponentWakeState, RootWakeSlot},
+        wake::{push_wake_enabled, ComponentWakeState},
         ComponentDrawer, ComponentUpdater, UpdateContext,
     },
 };
@@ -170,9 +170,8 @@ impl InstantiatedComponent {
         node_id: NodeId,
         props: AnyProps,
         helper: Box<dyn ComponentHelperExt>,
-        root_wake_slot: Arc<RootWakeSlot>,
+        wake_state: Arc<ComponentWakeState>,
     ) -> Self {
-        let wake_state = Arc::new(ComponentWakeState::new(root_wake_slot));
         let proxy_waker = Waker::from(Arc::clone(&wake_state));
         Self {
             node_id,
@@ -190,10 +189,6 @@ impl InstantiatedComponent {
             wake_state,
             proxy_waker,
         }
-    }
-
-    pub(crate) fn root_wake_slot(&self) -> &Arc<RootWakeSlot> {
-        self.wake_state.root()
     }
 
     pub fn node_id(&self) -> NodeId {
@@ -223,7 +218,7 @@ impl InstantiatedComponent {
             unattached_child_node_ids,
             context,
             component_context_stack,
-            Arc::clone(self.wake_state.root()),
+            Arc::clone(&self.wake_state),
         );
         self.hooks.pre_component_update(&mut updater);
         self.helper.update_component(
@@ -336,6 +331,10 @@ impl InstantiatedComponent {
     /// re-run, exactly as a harvested change would.
     pub(crate) fn settle_render_phase(&mut self) -> bool {
         debug_assert!(push_wake_enabled());
+        // Same subtree gate as the harvest scan, peeked rather than consumed.
+        if !self.wake_state.is_subtree_dirty() {
+            return false;
+        }
         let mut settled = false;
         if self.wake_state.is_dirty()
             && self.hooks.settle_render_phase_change(&self.proxy_waker)
@@ -368,6 +367,15 @@ impl InstantiatedComponent {
 
     fn poll_change(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let harvest = push_wake_enabled();
+        // Subtree gate (dirty-path W2): no wake has landed on this component
+        // or below since the last scan consumed the bit, so nothing here can
+        // have changed and the whole subtree is skipped. Without it the scan
+        // still visited every component just to read its dirty bit.
+        if harvest && !self.wake_state.take_subtree_dirty() {
+            return Poll::Pending;
+        }
+        #[cfg(test)]
+        SCAN_DESCENTS.with(|count| count.set(count.get() + 1));
         // Harvest scan: hooks obey the Future contract (Pending ⇒ they re-poll
         // only after a wake), and in push mode every wake lands on this
         // component's dirty bit. A clean component's hook wakers are still
@@ -410,6 +418,15 @@ impl InstantiatedComponent {
             Poll::Pending
         }
     }
+}
+
+// Components the harvest scan descended into (past the subtree gate), for
+// tests that prove a clean subtree is not walked. Thread-local: the mock
+// render loop runs on the test's own thread, so parallel tests do not
+// pollute each other's count.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SCAN_DESCENTS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
 #[derive(Default)]

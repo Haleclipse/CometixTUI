@@ -76,33 +76,83 @@ pub(crate) struct RootWakeSlot {
     pub(crate) waker: AtomicWaker,
 }
 
-/// Per-component wake state: the dirty bit consumed by the harvest scan plus
-/// the shared route back to the render loop.
+/// Per-component wake state: the dirty bit consumed by the harvest scan, the
+/// subtree bit that lets the scan skip clean subtrees, the parent link the
+/// subtree bit is propagated along, and the shared route back to the render
+/// loop.
 ///
 /// Held as an `Arc` by both the component and any waker clones handed to
 /// hooks/futures, so a wake that arrives after the component was dropped only
-/// flips an orphaned bit — it never dereferences component memory.
+/// flips orphaned bits — it never dereferences component memory. Parent links
+/// point up only, so there is no cycle: a dropped subtree releases its states.
 pub(crate) struct ComponentWakeState {
     dirty: AtomicBool,
+    // Self or some descendant is dirty (dirty-path W2). Set bottom-up by every
+    // wake, consumed top-down by the harvest scan, which returns early from any
+    // component whose bit is clear instead of visiting every descendant to
+    // read its dirty bit — on a large tree that visit was the single biggest
+    // per-keystroke cost, more than the update pass itself.
+    subtree_dirty: AtomicBool,
+    parent: Option<Arc<ComponentWakeState>>,
     root: Arc<RootWakeSlot>,
 }
 
 impl ComponentWakeState {
-    /// New components start dirty so their first poll arms every hook waker.
-    pub(crate) fn new(root: Arc<RootWakeSlot>) -> Self {
-        Self {
+    /// The root of a tree. New components start dirty so their first poll arms
+    /// every hook waker.
+    pub(crate) fn new_root(root: Arc<RootWakeSlot>) -> Arc<Self> {
+        Arc::new(Self {
             dirty: AtomicBool::new(true),
+            subtree_dirty: AtomicBool::new(true),
+            parent: None,
             root,
-        }
+        })
+    }
+
+    /// A component instantiated under `parent`. Marks the ancestors as well:
+    /// the scan after the render that mounted it only descends dirty paths,
+    /// and this is how the new component's first poll becomes reachable.
+    pub(crate) fn new_child(parent: &Arc<ComponentWakeState>) -> Arc<Self> {
+        let state = Arc::new(Self {
+            dirty: AtomicBool::new(true),
+            subtree_dirty: AtomicBool::new(true),
+            parent: Some(Arc::clone(parent)),
+            root: Arc::clone(&parent.root),
+        });
+        parent.mark_subtree_dirty_upwards();
+        state
     }
 
     pub(crate) fn root(&self) -> &Arc<RootWakeSlot> {
         &self.root
     }
 
+    /// Sets the subtree bit here and on every ancestor. Stops at the first one
+    /// already set: everything above it is set too, or a scan is currently
+    /// between consuming that ancestor's bit and descending to here — either
+    /// way this path is still reached. The loop wake is the caller's job.
+    fn mark_subtree_dirty_upwards(&self) {
+        let mut node = Some(self);
+        while let Some(state) = node {
+            if state.subtree_dirty.swap(true, Ordering::AcqRel) {
+                break;
+            }
+            node = state.parent.as_deref();
+        }
+    }
+
     /// Consumes the dirty bit for this frame's harvest decision.
     pub(crate) fn take_dirty(&self) -> bool {
         self.dirty.swap(false, Ordering::AcqRel)
+    }
+
+    /// Consumes the subtree bit: `false` means no wake landed on this
+    /// component or below since the last scan, so the scan can skip the whole
+    /// subtree. Consumed before `take_dirty` because a wake sets `dirty` first
+    /// and then marks the path, so a wake racing the scan is never lost: the
+    /// path it marks afterwards brings the next scan back here.
+    pub(crate) fn take_subtree_dirty(&self) -> bool {
+        self.subtree_dirty.swap(false, Ordering::AcqRel)
     }
 
     /// Reads the dirty bit without consuming it. The settle pass only peeks:
@@ -113,10 +163,9 @@ impl ComponentWakeState {
         self.dirty.load(Ordering::Acquire)
     }
 
-    /// Re-marks the component dirty without waking the loop (used when a poll
-    /// must be retried next frame, e.g. a borrow conflict).
-    pub(crate) fn mark_dirty(&self) {
-        self.dirty.store(true, Ordering::Release);
+    /// Reads the subtree bit without consuming it (settle pass).
+    pub(crate) fn is_subtree_dirty(&self) -> bool {
+        self.subtree_dirty.load(Ordering::Acquire)
     }
 }
 
@@ -127,6 +176,7 @@ impl Wake for ComponentWakeState {
 
     fn wake_by_ref(self: &Arc<Self>) {
         self.dirty.store(true, Ordering::Release);
+        self.mark_subtree_dirty_upwards();
         self.root.waker.wake();
     }
 }
@@ -366,5 +416,198 @@ mod settle_tests {
             rendered.contains("resolved=false"),
             "settle polled a future inside the render phase: {rendered:?}"
         );
+    }
+}
+
+// Dirty-path W2: the harvest scan descends dirty paths only.
+#[cfg(test)]
+mod scan_tests {
+    use crate::component::SCAN_DESCENTS;
+    use crate::prelude::*;
+    use futures::stream::StreamExt;
+    use std::time::Duration;
+
+    const QUIET_ROWS: usize = 200;
+
+    // A large subtree that never wakes. Whether the scan walks it cannot be
+    // seen from inside (a clean component's own poll is skipped either way),
+    // so the test counts the scan's descents instead.
+    #[component]
+    fn QuietSubtree() -> impl Into<AnyElement<'static>> {
+        element! {
+            View(flex_direction: FlexDirection::Column) {
+                #((0..QUIET_ROWS).map(|i| element!(Text(key: i, content: format!("row {i}")))))
+            }
+        }
+    }
+
+    #[component]
+    fn Ticker(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let ticks = hooks.use_state(|| 0u8);
+        let mut ticks_for_interval = ticks;
+        hooks.use_interval(
+            move || ticks_for_interval.set(ticks_for_interval.get().saturating_add(1)),
+            Some(Duration::from_millis(1)),
+        );
+        if ticks.get() >= 5 {
+            system.exit();
+        }
+        element!(Text(content: format!("ticks={}", ticks.get())))
+    }
+
+    // Two sibling subtrees: one quiet and large, one waking every millisecond
+    // (the ticker). Each tick wakes the ticker's path only, so after the one
+    // arming scan the quiet rows must never be descended into again.
+    #[component]
+    fn SiblingSubtreesApp() -> impl Into<AnyElement<'static>> {
+        element! {
+            View(flex_direction: FlexDirection::Column) {
+                QuietSubtree
+                View { Ticker }
+            }
+        }
+    }
+
+    #[test]
+    fn test_scan_skips_clean_sibling_subtree() {
+        SCAN_DESCENTS.with(|count| count.set(0));
+        super::set_push_wake_for_tests(Some(true));
+        let canvases: Vec<_> = smol::block_on(
+            element!(SiblingSubtreesApp)
+                .mock_terminal_render_loop(MockTerminalConfig::default())
+                .collect(),
+        );
+        super::set_push_wake_for_tests(None);
+        let rendered = canvases.last().unwrap().to_string();
+        assert!(rendered.contains("ticks=5"), "{rendered:?}");
+        let descents = SCAN_DESCENTS.with(|count| count.get());
+        // One arming scan covers the whole tree (~QUIET_ROWS + a handful);
+        // each of the five ticks should then descend a handful of components
+        // on the ticker's path. Walking the quiet rows once per tick would
+        // put this at ten-plus full trees.
+        assert!(
+            descents < 2 * QUIET_ROWS,
+            "scan descended {descents} components over the run; the quiet subtree was re-walked"
+        );
+    }
+
+    // Plain views — no handlers, not focusable. Their only live event
+    // subscription is the mouse one, so a keystroke must not wake any of them.
+    #[component]
+    fn PlainRows() -> impl Into<AnyElement<'static>> {
+        element! {
+            View(flex_direction: FlexDirection::Column) {
+                #((0..QUIET_ROWS).map(|i| element! {
+                    View(key: i) { Text(content: format!("row {i}")) }
+                }))
+            }
+        }
+    }
+
+    #[component]
+    fn KeyCounterApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let keys = hooks.use_state(|| 0u8);
+        let mut keys_for_events = keys;
+        hooks.use_terminal_events(move |event| {
+            if let TerminalEvent::Key(_) = event {
+                keys_for_events.set(keys_for_events.get().saturating_add(1));
+            }
+        });
+        if keys.get() >= 5 {
+            system.exit();
+        }
+        element! {
+            View(flex_direction: FlexDirection::Column) {
+                PlainRows
+                Text(content: format!("keys={}", keys.get()))
+            }
+        }
+    }
+
+    #[test]
+    fn test_keystrokes_do_not_wake_plain_views() {
+        SCAN_DESCENTS.with(|count| count.set(0));
+        super::set_push_wake_for_tests(Some(true));
+        let keys = (0..5)
+            .map(|_| TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('a'))));
+        let canvases: Vec<_> = smol::block_on(
+            element!(KeyCounterApp)
+                .mock_terminal_render_loop(MockTerminalConfig::with_events(
+                    futures::stream::iter(keys),
+                ))
+                .collect(),
+        );
+        super::set_push_wake_for_tests(None);
+        let rendered = canvases.last().unwrap().to_string();
+        assert!(rendered.contains("keys=5"), "{rendered:?}");
+        let descents = SCAN_DESCENTS.with(|count| count.get());
+        // The arming scan covers every component once (a view and a text per
+        // row plus a handful); each key should then descend the root only. A
+        // keystroke fanned out to the rows adds QUIET_ROWS descents per key.
+        assert!(
+            descents < 3 * QUIET_ROWS,
+            "scan descended {descents} components over the run; keystrokes woke the plain rows"
+        );
+    }
+
+    #[component]
+    fn LateTicker(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let ticks = hooks.use_state(|| 0u8);
+        let mut ticks_for_interval = ticks;
+        hooks.use_interval(
+            move || ticks_for_interval.set(ticks_for_interval.get().saturating_add(1)),
+            Some(Duration::from_millis(1)),
+        );
+        if ticks.get() >= 2 {
+            system.exit();
+        }
+        element!(Text(content: format!("late ticks={}", ticks.get())))
+    }
+
+    // The ticker is mounted by a later render, under a parent whose path the
+    // scan has already consumed. Instantiation must re-mark that path, or the
+    // post-render scan never reaches the new component and its interval is
+    // never armed.
+    #[component]
+    fn LateMountApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let show = hooks.use_state(|| false);
+        let mut show_for_future = show;
+        hooks.use_future(async move {
+            show_for_future.set(true);
+        });
+        element! {
+            View {
+                #(if show.get() {
+                    element!(LateTicker).into_any()
+                } else {
+                    element!(Text(content: "waiting")).into_any()
+                })
+            }
+        }
+    }
+
+    #[test]
+    fn test_late_mounted_component_is_reachable_by_the_scan() {
+        use futures::FutureExt;
+        super::set_push_wake_for_tests(Some(true));
+        let mut app = element!(LateMountApp);
+        let frames = smol::block_on(futures::future::select(
+            app.mock_terminal_render_loop(MockTerminalConfig::default())
+                .map(|canvas| canvas.to_string())
+                .collect::<Vec<_>>()
+                .boxed_local(),
+            smol::Timer::after(Duration::from_secs(5)),
+        ));
+        super::set_push_wake_for_tests(None);
+        let frames = match frames {
+            futures::future::Either::Left((frames, _)) => frames,
+            futures::future::Either::Right(_) => {
+                panic!("render loop parked: a late-mounted component was never scanned")
+            }
+        };
+        assert!(frames.last().unwrap().contains("late ticks=2"), "{frames:?}");
     }
 }

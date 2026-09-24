@@ -361,9 +361,10 @@ pub struct ComponentUpdater<'a, 'b: 'a, 'c: 'a, 'w> {
     unattached_child_node_ids: &'a mut Vec<NodeId>,
     context: &'a mut UpdateContext<'b, 'w>,
     component_context_stack: &'a mut ContextStack<'c>,
-    // Shared route to the render loop for push-mode wake proxies; handed to
-    // every child component instantiated during this update.
-    root_wake_slot: std::sync::Arc<wake::RootWakeSlot>,
+    // Wake state of the component being updated: every child instantiated
+    // during this update hangs its own state off it (dirty-path W2 parent
+    // link), which also carries the shared route to the render loop.
+    wake_parent: std::sync::Arc<wake::ComponentWakeState>,
 }
 
 impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
@@ -373,7 +374,7 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
         unattached_child_node_ids: &'a mut Vec<NodeId>,
         context: &'a mut UpdateContext<'b, 'w>,
         component_context_stack: &'a mut ContextStack<'c>,
-        root_wake_slot: std::sync::Arc<wake::RootWakeSlot>,
+        wake_parent: std::sync::Arc<wake::ComponentWakeState>,
     ) -> Self {
         Self {
             node_id,
@@ -384,7 +385,7 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
             unattached_child_node_ids,
             context,
             component_context_stack,
-            root_wake_slot,
+            wake_parent,
         }
     }
 
@@ -677,7 +678,7 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
                                     new_node_id,
                                     child.props_mut(),
                                     h,
-                                    std::sync::Arc::clone(&self.root_wake_slot),
+                                    wake::ComponentWakeState::new_child(&self.wake_parent),
                                 )
                             }
                         };
@@ -1402,7 +1403,9 @@ impl<'a> Tree<'a> {
                 root_node_id,
                 props.borrow(),
                 helper,
-                std::sync::Arc::new(wake::RootWakeSlot::default()),
+                wake::ComponentWakeState::new_root(std::sync::Arc::new(
+                    wake::RootWakeSlot::default(),
+                )),
             ),
             root_component_props: props,
             system_context: SystemContext::new(),
