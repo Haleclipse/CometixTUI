@@ -1239,7 +1239,15 @@ impl Component for View {
 
         let mut on_resize = props.on_resize.take();
         let wants_resize = !on_resize.is_default();
-        hooks.use_terminal_events(move |event| {
+        // Each of this component's event hooks declares exactly the events it
+        // can act on, so a plain view — no handlers, not focusable — costs the
+        // terminal nothing per keystroke.
+        let resize_interest = if wants_resize {
+            crate::TerminalEventInterest::RESIZE
+        } else {
+            crate::TerminalEventInterest::NONE
+        };
+        hooks.use_terminal_events_for(resize_interest, move |event| {
             if !wants_resize {
                 return;
             }
@@ -1326,7 +1334,12 @@ impl Component for View {
         let hovered_views_for_children = hovered_views.clone();
         let hover_registry_for_event = hover_registry.clone();
         let hovered_views_for_event = hovered_views.clone();
-        hooks.use_terminal_events(move |event| {
+        let hover_interest = if is_hover_dispatch_root {
+            crate::TerminalEventInterest::MOUSE
+        } else {
+            crate::TerminalEventInterest::NONE
+        };
+        hooks.use_terminal_events_for(hover_interest, move |event| {
             if !is_hover_dispatch_root {
                 return;
             }
@@ -1513,7 +1526,12 @@ impl Component for View {
         let inherited_key_handlers = parent_view_context.key_down_handlers.clone();
         let key_target_view = Some(self.view_id);
         let key_focus = self.focus_id.zip(self.focus_ctx);
-        hooks.use_propagated_terminal_events(move |event| {
+        let key_interest = if key_focus.is_some() {
+            crate::TerminalEventInterest::KEY
+        } else {
+            crate::TerminalEventInterest::NONE
+        };
+        hooks.use_propagated_terminal_events_for(key_interest, move |event| {
             let Some((id, ctx)) = key_focus else {
                 return;
             };
@@ -1631,7 +1649,12 @@ impl Component for View {
         let inherited_paste_handlers = parent_view_context.paste_handlers.clone();
         let paste_target_view = Some(self.view_id);
         let paste_focus = self.focus_id.zip(self.focus_ctx);
-        hooks.use_propagated_terminal_events(move |event| {
+        let paste_interest = if paste_focus.is_some() {
+            crate::TerminalEventInterest::PASTE
+        } else {
+            crate::TerminalEventInterest::NONE
+        };
+        hooks.use_propagated_terminal_events_for(paste_interest, move |event| {
             let Some((id, ctx)) = paste_focus else {
                 return;
             };
@@ -1745,7 +1768,10 @@ impl Component for View {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(click_record);
         let view_id = self.view_id;
-        hooks.use_propagated_terminal_events(move |event| {
+        // Mouse only, but for every view: the topmost hit view runs the click
+        // dispatch (bubbling through the registry) and the focus hand-off, so
+        // even a view without handlers must see the mouse when it is the target.
+        hooks.use_propagated_terminal_events_for(crate::TerminalEventInterest::MOUSE, move |event| {
             let TerminalEvent::FullscreenMouse(FullscreenMouseEvent {
                 column,
                 row,

@@ -59,7 +59,7 @@ use capability::{
     osc_color_query_sequence_with_env, supports_extended_keys_with_env,
 };
 pub use events::*;
-use events::{EventCellSnapshot, TerminalEventsInner};
+use events::{EventCellSnapshot, TerminalEventsShared};
 pub use fullscreen::*;
 pub use input::*;
 pub use log_update::*;
@@ -270,7 +270,7 @@ pub(crate) struct Terminal<'a> {
     output: Output,
     base_fullscreen: bool,
     event_stream: Option<BoxStream<'static, io::Result<TerminalEvent>>>,
-    subscribers: Vec<Weak<Mutex<TerminalEventsInner>>>,
+    subscribers: Vec<Weak<TerminalEventsShared>>,
     event_cell_snapshot: Option<EventCellSnapshot>,
     terminal_focus_state: Option<bool>,
     last_stdin_event_at: Option<Instant>,
@@ -790,23 +790,27 @@ impl<'a> Terminal<'a> {
                 }
                 let event = Self::annotate_terminal_event(event, event_cell_snapshot.as_ref());
 
-                // Dispatch to all subscribers first — Ctrl+C is a normal event.
+                // Dispatch to the interested subscribers first — Ctrl+C is a
+                // normal event. A subscriber whose interest does not cover the
+                // event is left untouched: no clone, no queue entry, no wake.
                 let shared_state = Arc::new(SharedEventState::default());
                 let mut delivered = false;
                 self.subscribers.retain(|subscriber| {
-                    if let Some(subscriber) = subscriber.upgrade() {
-                        delivered = true;
-                        let mut subscriber = subscriber.lock().unwrap();
-                        subscriber
-                            .pending
-                            .push_back((event.clone(), shared_state.clone()));
-                        if let Some(waker) = subscriber.waker.take() {
-                            waker.wake();
-                        }
-                        true
-                    } else {
-                        false
+                    let Some(subscriber) = subscriber.upgrade() else {
+                        return false;
+                    };
+                    if !subscriber.interest().covers(&event) {
+                        return true;
                     }
+                    delivered = true;
+                    let mut inner = subscriber.inner.lock().unwrap();
+                    inner
+                        .pending
+                        .push_back((event.clone(), shared_state.clone()));
+                    if let Some(waker) = inner.waker.take() {
+                        waker.wake();
+                    }
+                    true
                 });
 
                 if is_ctrl_c && !self.ignore_ctrl_c {
@@ -833,12 +837,9 @@ impl<'a> Terminal<'a> {
 
     pub fn events(&mut self) -> io::Result<TerminalEvents> {
         self.start_event_stream()?;
-        let inner = Arc::new(Mutex::new(TerminalEventsInner {
-            pending: VecDeque::new(),
-            waker: None,
-        }));
-        self.subscribers.push(Arc::downgrade(&inner));
-        Ok(TerminalEvents { inner })
+        let shared = Arc::new(TerminalEventsShared::new());
+        self.subscribers.push(Arc::downgrade(&shared));
+        Ok(TerminalEvents { shared })
     }
 }
 

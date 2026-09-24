@@ -113,24 +113,161 @@ pub(super) struct TerminalEventsInner {
     pub(super) waker: Option<Waker>,
 }
 
+/// Which terminal events a subscriber wants delivered.
+///
+/// The terminal checks this before touching a subscriber: an event outside
+/// its interest is neither cloned into the subscriber's queue nor wakes it.
+/// Every `View` holds subscriptions that only ever act on the mouse or on a
+/// resize; without this, each keystroke was fanned out to all of them — on a
+/// long conversation, thousands of queue pushes and wakes per key, and every
+/// one of those components then polled its hook just to discard the event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TerminalEventInterest(u8);
+
+impl TerminalEventInterest {
+    /// Wants nothing. A hook with this interest holds no subscription at all.
+    pub const NONE: Self = Self(0);
+    /// [`TerminalEvent::Key`].
+    pub const KEY: Self = Self(1);
+    /// [`TerminalEvent::FullscreenMouse`].
+    pub const MOUSE: Self = Self(1 << 1);
+    /// [`TerminalEvent::Resize`].
+    pub const RESIZE: Self = Self(1 << 2);
+    /// [`TerminalEvent::FocusGained`] and [`TerminalEvent::FocusLost`].
+    pub const FOCUS: Self = Self(1 << 3);
+    /// [`TerminalEvent::Paste`].
+    pub const PASTE: Self = Self(1 << 4);
+    /// [`TerminalEvent::Response`].
+    pub const RESPONSE: Self = Self(1 << 5);
+    /// Every event — what the plain `use_terminal_events` hooks subscribe to.
+    pub const ALL: Self = Self(0x3f);
+
+    /// Both interests combined.
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// `true` if no event kind is wanted.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// `true` if every kind in `other` is wanted.
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// `true` if `event` should be delivered to a subscriber with this interest.
+    pub(crate) fn covers(self, event: &TerminalEvent) -> bool {
+        let needed = match event {
+            TerminalEvent::Key(_) => Self::KEY,
+            TerminalEvent::FullscreenMouse(_) => Self::MOUSE,
+            TerminalEvent::Resize(..) => Self::RESIZE,
+            TerminalEvent::FocusGained | TerminalEvent::FocusLost => Self::FOCUS,
+            TerminalEvent::Paste(_) => Self::PASTE,
+            TerminalEvent::Response(_) => Self::RESPONSE,
+        };
+        self.contains(needed)
+    }
+
+    fn bits(self) -> u8 {
+        self.0
+    }
+
+    fn from_bits(bits: u8) -> Self {
+        Self(bits & Self::ALL.0)
+    }
+}
+
+impl core::ops::BitOr for TerminalEventInterest {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self {
+        self.union(rhs)
+    }
+}
+
+/// One subscription as the terminal sees it: the interest it consults without
+/// locking, and the queue it fills when the interest covers the event.
+pub(super) struct TerminalEventsShared {
+    interest: std::sync::atomic::AtomicU8,
+    pub(super) inner: Mutex<TerminalEventsInner>,
+}
+
+impl TerminalEventsShared {
+    pub(super) fn new() -> Self {
+        Self {
+            interest: std::sync::atomic::AtomicU8::new(TerminalEventInterest::ALL.bits()),
+            inner: Mutex::new(TerminalEventsInner {
+                pending: VecDeque::new(),
+                waker: None,
+            }),
+        }
+    }
+
+    pub(super) fn interest(&self) -> TerminalEventInterest {
+        TerminalEventInterest::from_bits(self.interest.load(std::sync::atomic::Ordering::Acquire))
+    }
+}
+
 /// A stream of terminal events.
 pub struct TerminalEvents {
-    pub(super) inner: Arc<Mutex<TerminalEventsInner>>,
+    pub(super) shared: Arc<TerminalEventsShared>,
 }
 
 impl TerminalEvents {
+    /// Narrows (or widens) which events reach this stream. Applies to events
+    /// dispatched after the call; a new stream starts with
+    /// [`TerminalEventInterest::ALL`].
+    pub fn set_interest(&self, interest: TerminalEventInterest) {
+        self.shared
+            .interest
+            .store(interest.bits(), std::sync::atomic::Ordering::Release);
+    }
+
     /// Polls for the next event together with its shared propagation state.
     pub(crate) fn poll_next_shared(
         &mut self,
         cx: &mut Context,
     ) -> Poll<Option<(TerminalEvent, Arc<SharedEventState>)>> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.shared.inner.lock().unwrap();
         if let Some(entry) = inner.pending.pop_front() {
             Poll::Ready(Some(entry))
         } else {
             inner.waker = Some(cx.waker().clone());
             Poll::Pending
         }
+    }
+}
+
+#[cfg(test)]
+mod interest_tests {
+    use super::*;
+
+    #[test]
+    fn interest_covers_only_its_kinds() {
+        let key = TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('a')));
+        assert!(TerminalEventInterest::KEY.covers(&key));
+        assert!(!TerminalEventInterest::MOUSE.covers(&key));
+        assert!(TerminalEventInterest::ALL.covers(&TerminalEvent::Resize(1, 1)));
+        assert!(!TerminalEventInterest::NONE.covers(&TerminalEvent::Resize(1, 1)));
+        assert!(TerminalEventInterest::NONE.is_empty());
+        let key_or_paste = TerminalEventInterest::KEY | TerminalEventInterest::PASTE;
+        assert!(key_or_paste.covers(&TerminalEvent::Paste("x".into())));
+        assert!(key_or_paste.covers(&key));
+        assert!(!key_or_paste.covers(&TerminalEvent::FocusGained));
+        assert!(TerminalEventInterest::ALL.contains(key_or_paste));
+    }
+
+    #[test]
+    fn shared_subscription_reports_the_interest_it_was_given() {
+        let shared = TerminalEventsShared::new();
+        assert_eq!(shared.interest(), TerminalEventInterest::ALL);
+        let events = TerminalEvents {
+            shared: Arc::new(shared),
+        };
+        events.set_interest(TerminalEventInterest::RESIZE);
+        assert_eq!(events.shared.interest(), TerminalEventInterest::RESIZE);
     }
 }
 

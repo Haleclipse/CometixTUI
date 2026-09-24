@@ -1,6 +1,6 @@
 use crate::{
     ComponentUpdater, FullscreenMouseEvent, Hook, Hooks, KeyCode, KeyEventKind, KeyModifiers,
-    PropagatedTerminalEvent, TerminalEvent, TerminalEvents,
+    PropagatedTerminalEvent, TerminalEvent, TerminalEventInterest, TerminalEvents,
 };
 use core::{
     pin::Pin,
@@ -139,6 +139,23 @@ pub trait UseTerminalEvents: private::Sealed {
     fn use_propagated_terminal_events<F>(&mut self, f: F)
     where
         F: FnMut(&PropagatedTerminalEvent) + Send + 'static;
+
+    /// [`Self::use_terminal_events`] restricted to the events in `interest`.
+    ///
+    /// Events outside the interest never reach this component: the terminal
+    /// skips it during dispatch, so the component is not woken or polled for
+    /// them. With [`TerminalEventInterest::NONE`] the hook keeps its slot but
+    /// holds no subscription. The interest is re-read every render, so it can
+    /// follow the props that decide whether the component has anything to do.
+    fn use_terminal_events_for<F>(&mut self, interest: TerminalEventInterest, f: F)
+    where
+        F: FnMut(TerminalEvent) + Send + 'static;
+
+    /// [`Self::use_propagated_terminal_events`] restricted to the events in
+    /// `interest`; see [`Self::use_terminal_events_for`].
+    fn use_propagated_terminal_events_for<F>(&mut self, interest: TerminalEventInterest, f: F)
+    where
+        F: FnMut(&PropagatedTerminalEvent) + Send + 'static;
 }
 
 pub(crate) trait UseTerminalDefaultEvents: private::Sealed {
@@ -165,6 +182,7 @@ impl UseTerminalEvents for Hooks<'_, '_> {
             in_component: false,
             propagation_aware: false,
             observe_stopped: false,
+            interest: TerminalEventInterest::ALL,
             f: None,
         });
         h.f = Some(Box::new(move |event: &PropagatedTerminalEvent| {
@@ -182,6 +200,7 @@ impl UseTerminalEvents for Hooks<'_, '_> {
             in_component: true,
             propagation_aware: false,
             observe_stopped: false,
+            interest: TerminalEventInterest::ALL,
             f: None,
         });
         h.f = Some(Box::new(move |event: &PropagatedTerminalEvent| {
@@ -199,6 +218,7 @@ impl UseTerminalEvents for Hooks<'_, '_> {
             in_component: true,
             propagation_aware: true,
             observe_stopped: false,
+            interest: TerminalEventInterest::ALL,
             f: None,
         });
         h.f = Some(Box::new(f));
@@ -214,8 +234,45 @@ impl UseTerminalEvents for Hooks<'_, '_> {
             in_component: false,
             propagation_aware: true,
             observe_stopped: false,
+            interest: TerminalEventInterest::ALL,
             f: None,
         });
+        h.f = Some(Box::new(f));
+    }
+
+    fn use_terminal_events_for<F>(&mut self, interest: TerminalEventInterest, mut f: F)
+    where
+        F: FnMut(TerminalEvent) + Send + 'static,
+    {
+        let h = self.use_hook(move || UseTerminalEventsImpl {
+            events: None,
+            component_location: Default::default(),
+            in_component: false,
+            propagation_aware: false,
+            observe_stopped: false,
+            interest,
+            f: None,
+        });
+        h.interest = interest;
+        h.f = Some(Box::new(move |event: &PropagatedTerminalEvent| {
+            f(event.event().clone())
+        }));
+    }
+
+    fn use_propagated_terminal_events_for<F>(&mut self, interest: TerminalEventInterest, f: F)
+    where
+        F: FnMut(&PropagatedTerminalEvent) + Send + 'static,
+    {
+        let h = self.use_hook(move || UseTerminalEventsImpl {
+            events: None,
+            component_location: Default::default(),
+            in_component: false,
+            propagation_aware: true,
+            observe_stopped: false,
+            interest,
+            f: None,
+        });
+        h.interest = interest;
         h.f = Some(Box::new(f));
     }
 }
@@ -231,6 +288,7 @@ impl UseTerminalDefaultEvents for Hooks<'_, '_> {
             in_component: false,
             propagation_aware: true,
             observe_stopped: true,
+            interest: TerminalEventInterest::ALL,
             f: None,
         });
         h.f = Some(Box::new(f));
@@ -245,6 +303,7 @@ struct UseTerminalEventsImpl {
     in_component: bool,
     propagation_aware: bool,
     observe_stopped: bool,
+    interest: TerminalEventInterest,
     f: Option<EventCallback>,
 }
 
@@ -316,8 +375,17 @@ impl Hook for UseTerminalEventsImpl {
     }
 
     fn post_component_update(&mut self, updater: &mut ComponentUpdater) {
+        if self.interest.is_empty() {
+            // Nothing wanted this render: hold no subscription, so the
+            // terminal's dispatch never sees this hook at all.
+            self.events = None;
+            return;
+        }
         if self.events.is_none() {
             self.events = updater.terminal_events();
+        }
+        if let Some(events) = &self.events {
+            events.set_interest(self.interest);
         }
     }
 
@@ -365,6 +433,61 @@ mod tests {
         let actual = canvases.iter().map(|c| c.to_string()).collect::<Vec<_>>();
         let expected = vec!["", "received event\n"];
         assert_eq!(actual, expected);
+    }
+
+    // Two subscriptions on one component: a RESIZE-only one and a plain one
+    // that counts everything and exits. The terminal must never hand a key to
+    // the RESIZE subscriber.
+    #[component]
+    fn ResizeOnlyComponent(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let resizes = hooks.use_state(|| 0u8);
+        let unwanted = hooks.use_state(|| 0u8);
+        let total = hooks.use_state(|| 0u8);
+        let mut resizes_for_events = resizes;
+        let mut unwanted_for_events = unwanted;
+        hooks.use_terminal_events_for(TerminalEventInterest::RESIZE, move |event| {
+            if let TerminalEvent::Resize(..) = event {
+                resizes_for_events.set(resizes_for_events.get() + 1);
+            } else {
+                unwanted_for_events.set(unwanted_for_events.get() + 1);
+            }
+        });
+        let mut total_for_events = total;
+        hooks.use_terminal_events(move |_| total_for_events.set(total_for_events.get() + 1));
+        if total.get() >= 3 {
+            system.exit();
+        }
+        element!(Text(content: format!(
+            "resizes={} unwanted={} total={}",
+            resizes.get(),
+            unwanted.get(),
+            total.get()
+        )))
+    }
+
+    #[apply(test!)]
+    async fn test_interest_keeps_unwanted_events_away_from_a_subscriber() {
+        let key = || {
+            TerminalEvent::Key(KeyEvent {
+                code: KeyCode::Char('f'),
+                modifiers: KeyModifiers::empty(),
+                kind: KeyEventKind::Press,
+            })
+        };
+        let canvases: Vec<_> = element!(ResizeOnlyComponent)
+            .mock_terminal_render_loop(
+                MockTerminalConfig::with_events(stream::iter(vec![
+                    key(),
+                    TerminalEvent::Resize(100, 30),
+                    key(),
+                ]))
+                .with_size(80, 24),
+            )
+            .collect()
+            .await;
+        let rendered = canvases.last().unwrap().to_string();
+        assert_eq!(rendered, "resizes=1 unwanted=0 total=3\n");
     }
 
     #[component]
