@@ -158,6 +158,9 @@ pub struct MixedText {
     contents: Vec<MixedTextContent>,
     wrap: TextWrap,
     align: TextAlign,
+    /// The (plaintext, wrap) the installed measure function was built from.
+    /// `None` until the first update installs one.
+    measured: Option<(String, TextWrap)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,7 +199,18 @@ impl MixedText {
         self.contents = contents;
         self.wrap = wrap;
         self.align = align;
-        updater.set_measure_func(Text::measure_func(plaintext, wrap));
+        // Same guard as `Text::update`: re-installing the measure function
+        // marks the Taffy node dirty up to the root and drops its measure
+        // memo, so only do it when the inputs the function reads changed.
+        // Colors and other styles are draw-time only.
+        let unchanged = self
+            .measured
+            .as_ref()
+            .is_some_and(|(text, measured_wrap)| *text == plaintext && *measured_wrap == wrap);
+        if !unchanged {
+            self.measured = Some((plaintext.clone(), wrap));
+            updater.set_measure_func(Text::measure_func(plaintext, wrap));
+        }
     }
 
     fn line_is_soft_continuation(

@@ -186,8 +186,10 @@ Two diagnostic variables, each a comma-separated list of tokens, read once per p
 | `IOCRAFT_DISABLE` | `push-wake` | Poll every component every frame instead of only the woken paths |
 | | `retained-blit` | Re-draw memo-retained subtrees instead of blitting them from the previous canvas |
 | | `damage-skip` | Diff every row instead of only the rows a canvas write marked |
+| | `measure-memo` | Run every measure function Taffy asks for instead of answering repeat probes from the node's memo |
 | `IOCRAFT_DEBUG` | `settle` | Print each component whose render-phase state write re-ran the update |
 | | `cells` | Count changed cells per frame for the render profile |
+| | `layout` | Print per-frame layout statistics to stderr: measure functions run, probes answered, dirty nodes before layout, cache invalidations by entry point |
 | | `frame-log=PATH` | Append one line per frame describing the canvas and the repaint to PATH |
 | | `layout-dump=PATH` | Append every frame's layout tree to PATH |
 

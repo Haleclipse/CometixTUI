@@ -32,6 +32,7 @@ pub(crate) struct Disabled {
     pub(crate) push_wake: bool,
     pub(crate) retained_blit: bool,
     pub(crate) damage_skip: bool,
+    pub(crate) measure_memo: bool,
 }
 
 impl Disabled {
@@ -42,6 +43,7 @@ impl Disabled {
                 "push-wake" => disabled.push_wake = true,
                 "retained-blit" => disabled.retained_blit = true,
                 "damage-skip" => disabled.damage_skip = true,
+                "measure-memo" => disabled.measure_memo = true,
                 _ => {}
             }
         }
@@ -54,6 +56,7 @@ impl Disabled {
 pub(crate) struct Diagnostics {
     pub(crate) settle: bool,
     pub(crate) cells: bool,
+    pub(crate) layout: bool,
     pub(crate) frame_log: Option<PathBuf>,
     pub(crate) layout_dump: Option<PathBuf>,
 }
@@ -69,6 +72,7 @@ impl Diagnostics {
             match key.to_ascii_lowercase().as_str() {
                 "settle" => diagnostics.settle = true,
                 "cells" => diagnostics.cells = true,
+                "layout" => diagnostics.layout = true,
                 "frame-log" => diagnostics.frame_log = non_empty_path(path),
                 "layout-dump" => diagnostics.layout_dump = non_empty_path(path),
                 _ => {}
@@ -123,6 +127,7 @@ mod tests {
                 push_wake: true,
                 retained_blit: false,
                 damage_skip: true,
+                measure_memo: false,
             }
         );
     }
@@ -151,6 +156,7 @@ mod tests {
             Diagnostics {
                 settle: true,
                 cells: true,
+                layout: false,
                 frame_log: Some(PathBuf::from("/Tmp/Frames.log")),
                 layout_dump: None,
             }

@@ -41,6 +41,28 @@ pub(crate) struct UpdateContext<'a, 'w> {
     did_clear_terminal_output: bool,
     force_full_repaint: bool,
     invalidate_prev_frame: bool,
+    layout_invalidations: LayoutInvalidations,
+}
+
+/// How many Taffy cache invalidations one update pass issued, by entry point.
+/// Each `set_style` / measure-func swap / `set_children` clears the node's
+/// cache and its ancestors'; `set_children_same` counts the calls whose child
+/// list had not changed. Reported by `IOCRAFT_DEBUG=layout`.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct LayoutInvalidations {
+    set_style: usize,
+    set_measure: usize,
+    set_children: usize,
+    set_children_same: usize,
+}
+
+impl LayoutInvalidations {
+    fn add(&mut self, other: Self) {
+        self.set_style += other.set_style;
+        self.set_measure += other.set_measure;
+        self.set_children += other.set_children;
+        self.set_children_same += other.set_children_same;
+    }
 }
 
 /// Opt-in gate for the profiling-only changed-cell count: an O(canvas) scan
@@ -508,6 +530,16 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
 
     /// Sets the layout style of the current component.
     pub fn set_layout_style(&mut self, layout_style: taffy::style::Style) {
+        self.context.layout_invalidations.set_style += 1;
+        // The measure function receives the style, so memoized results
+        // may not survive a style change.
+        if let Some(cx) = self
+            .context
+            .layout_engine
+            .get_node_context_mut(self.node_id)
+        {
+            cx.measure_memo.clear();
+        }
         self.context
             .layout_engine
             .set_style(self.node_id, layout_style)
@@ -536,11 +568,14 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
     /// Sets the measure function of the current component, which is invoked to calculate the area
     /// that the component's content should occupy.
     pub fn set_measure_func(&mut self, measure_func: MeasureFunc) {
-        self.context
+        self.context.layout_invalidations.set_measure += 1;
+        let cx = self
+            .context
             .layout_engine
             .get_node_context_mut(self.node_id)
-            .expect("we should be able to get the node")
-            .measure_func = Some(measure_func);
+            .expect("we should be able to get the node");
+        cx.measure_func = Some(measure_func);
+        cx.measure_memo.clear();
         self.context
             .layout_engine
             .mark_dirty(self.node_id)
@@ -619,15 +654,36 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
         if self.transparent_layout {
             self.unattached_child_node_ids
                 .extend(child_node_ids.iter().copied());
+            Self::count_set_children(self.context, self.node_id, &[]);
             self.context
                 .layout_engine
                 .set_children(self.node_id, &[])
                 .expect("we should be able to set the children");
         } else {
+            Self::count_set_children(self.context, self.node_id, &child_node_ids);
             self.context
                 .layout_engine
                 .set_children(self.node_id, &child_node_ids)
                 .expect("we should be able to set the children");
+        }
+    }
+
+    // Takes the context field rather than `&mut self` so it can run inside
+    // `update_children`'s closure, which already borrows other fields.
+    fn count_set_children(
+        context: &mut UpdateContext<'_, '_>,
+        node_id: NodeId,
+        children: &[NodeId],
+    ) {
+        let same = context
+            .layout_engine
+            .children(node_id)
+            .map(|current| current == children)
+            .unwrap_or(false);
+        if same {
+            context.layout_invalidations.set_children_same += 1;
+        } else {
+            context.layout_invalidations.set_children += 1;
         }
     }
 
@@ -687,6 +743,7 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
                     used_components.push_back(child.key().clone(), component);
                 }
 
+                Self::count_set_children(self.context, self.node_id, &direct_child_node_ids);
                 self.context
                     .layout_engine
                     .set_children(self.node_id, &direct_child_node_ids)
@@ -1296,12 +1353,157 @@ impl ComponentDrawer<'_> {
 
 /// The measure function of the current component, which is invoked to calculate the area that the
 /// component's content should occupy.
+///
+/// Results are memoized per node on the known width and the available
+/// width (see `MeasureMemo`), so a measure function must depend on nothing
+/// else: not the known or available height, and not the style. Definite
+/// widths must also be monotone: for any known or definite available width
+/// at or above the width the function reports for a very wide definite
+/// width, it must return that same size — the "nothing wraps above the
+/// natural width" rule that lets a probe at a new width reuse the natural
+/// size. (`AvailableSpace::MaxContent` may measure differently, e.g. keep
+/// trailing spaces; it is not used for this rule.)
 pub type MeasureFunc =
     Box<dyn Fn(Size<Option<f32>>, Size<AvailableSpace>, &Style) -> Size<f32> + Send>;
 
 #[derive(Default)]
 pub(crate) struct LayoutEngineNodeContext {
     measure_func: Option<MeasureFunc>,
+    measure_memo: MeasureMemo,
+}
+
+// Taffy probes a flex item with up to seven distinct (known, available)
+// combinations per pass (min/max-content, the base-size, hypothetical-cross
+// and final passes, each axis); match its own nine-entry measure cache so a
+// pass never evicts what the next pass asks for.
+const MEASURE_MEMO_SLOTS: usize = 9;
+
+/// The inputs a measure function's result depends on: the known width and
+/// the available width. Both height inputs are deliberately absent: see
+/// [`MeasureMemo`]. A known height is folded into the result by
+/// `compute_leaf_layout` after the measure function returns, so it never
+/// changes what the function computes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct MeasureKey {
+    known_width: u32,
+    available_width: u32,
+}
+
+impl std::fmt::Debug for MeasureKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let dim = |bits: u32| match bits {
+            Self::NONE => "-".to_string(),
+            Self::MIN_CONTENT => "min".to_string(),
+            Self::MAX_CONTENT => "max".to_string(),
+            bits => format!("{}", f32::from_bits(bits)),
+        };
+        write!(
+            f,
+            "kw={} aw={}",
+            dim(self.known_width),
+            dim(self.available_width)
+        )
+    }
+}
+
+impl MeasureKey {
+    const NONE: u32 = u32::MAX;
+    const MIN_CONTENT: u32 = u32::MAX - 1;
+    const MAX_CONTENT: u32 = u32::MAX - 2;
+
+    fn new(known: Size<Option<f32>>, available: Size<AvailableSpace>) -> Self {
+        Self {
+            known_width: known.width.map_or(Self::NONE, f32::to_bits),
+            available_width: match available.width {
+                AvailableSpace::Definite(value) => value.to_bits(),
+                AvailableSpace::MinContent => Self::MIN_CONTENT,
+                AvailableSpace::MaxContent => Self::MAX_CONTENT,
+            },
+        }
+    }
+}
+
+/// The last results of a node's measure function, keyed on the known width
+/// and the available width only.
+///
+/// Taffy keys every size probe on the full known dimensions and available
+/// space, and a flex container hands its children its own height in both:
+/// as their available height (the final pass passes `container_size`, the
+/// hypothetical-cross pass the item's target main size) and, in some probes,
+/// as a known height. On an inline canvas that height is the content
+/// height, so every appended line changes the key of every leaf below it and
+/// the whole tree re-measures: over 100k text measurements per frame on a
+/// long session, two seconds a frame. Yoga's `canUseCachedMeasurement`
+/// relaxes the height dimension for exactly this case, and Ink's text height
+/// depends on width alone. No measure function in this crate reads either
+/// height input, so a hit here returns what the function would have.
+///
+/// Cleared whenever the measure function or the node's style is replaced.
+/// `IOCRAFT_DISABLE=measure-memo` bypasses it.
+#[derive(Default)]
+struct MeasureMemo {
+    entries: [Option<(MeasureKey, Size<f32>)>; MEASURE_MEMO_SLOTS],
+    next: usize,
+    /// The size the measure function reports for a definite width wider than
+    /// any terminal (`NATURAL_PROBE_WIDTH`): the node's natural size along
+    /// the definite-width path. Computed on the first definite-width miss.
+    natural: Option<Size<f32>>,
+}
+
+/// The definite width used to probe a node's natural size: wider than any
+/// terminal, small enough that column arithmetic in a wrapper cannot
+/// overflow. Deliberately not `AvailableSpace::MaxContent`, which text
+/// measures along a different path (the raw content, trailing spaces kept).
+const NATURAL_PROBE_WIDTH: f32 = u32::MAX as f32;
+
+impl MeasureKey {
+    /// The width the measure function will lay out against: the known width
+    /// when given, else a definite available width. `None` for the
+    /// min-content and max-content probes.
+    fn effective_width(&self) -> Option<f32> {
+        match (self.known_width, self.available_width) {
+            (Self::NONE, Self::MIN_CONTENT | Self::MAX_CONTENT) => None,
+            (Self::NONE, bits) => Some(f32::from_bits(bits)),
+            (bits, _) => Some(f32::from_bits(bits)),
+        }
+    }
+}
+
+impl MeasureMemo {
+    fn get(&self, key: MeasureKey) -> Option<Size<f32>> {
+        if let Some((_, size)) = self
+            .entries
+            .iter()
+            .flatten()
+            .find(|(entry_key, _)| *entry_key == key)
+        {
+            return Some(*size);
+        }
+        self.natural_for(key)
+    }
+
+    /// Yoga's second `canUseCachedMeasurement` rule: a definite-width probe
+    /// at or above the node's natural width sees the natural size, because
+    /// nothing wraps or truncates. This is the contract documented on
+    /// `MeasureFunc`; the width is floored the way the text components floor
+    /// it before wrapping.
+    fn natural_for(&self, key: MeasureKey) -> Option<Size<f32>> {
+        let effective = key.effective_width()?.floor();
+        self.natural.filter(|natural| natural.width <= effective)
+    }
+
+    fn store(&mut self, key: MeasureKey, size: Size<f32>) {
+        self.entries[self.next] = Some((key, size));
+        self.next = (self.next + 1) % MEASURE_MEMO_SLOTS;
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn keys(&self) -> Vec<MeasureKey> {
+        self.entries.iter().flatten().map(|(key, _)| *key).collect()
+    }
 }
 
 /// Newtype around [`TaffyTree`] that restores `Send`.
@@ -1430,15 +1632,17 @@ impl<'a> Tree<'a> {
         // a normal frame like today.
         let mut settle_rounds_left = if wake::push_wake_enabled() { 2 } else { 0 };
         let mut settle_rounds_taken = 0usize;
+        let mut layout_invalidations = LayoutInvalidations::default();
         loop {
             wrapper_child_node_ids.truncate(1);
-            let (did_clear, force_full, invalidate) = {
+            let (did_clear, force_full, invalidate, invalidations) = {
                 let mut context = UpdateContext {
                     terminal: terminal.as_deref_mut(),
                     layout_engine: &mut self.layout_engine,
                     did_clear_terminal_output: false,
                     force_full_repaint: false,
                     invalidate_prev_frame: false,
+                    layout_invalidations: LayoutInvalidations::default(),
                 };
                 let mut component_context_stack = ContextStack::root(&mut self.system_context);
                 // CC Ink dispatches hit-test/focus events from a single DOM root.
@@ -1468,8 +1672,10 @@ impl<'a> Tree<'a> {
                     context.did_clear_terminal_output,
                     context.force_full_repaint,
                     context.invalidate_prev_frame,
+                    context.layout_invalidations,
                 )
             };
+            layout_invalidations.add(invalidations);
             did_clear_terminal_output |= did_clear;
             force_full_repaint |= force_full;
             invalidate_prev_frame |= invalidate;
@@ -1485,6 +1691,20 @@ impl<'a> Tree<'a> {
         let update_duration = update_start.map_or(Duration::ZERO, |start| start.elapsed());
         let layout_start = profile_enabled.then(std::time::Instant::now);
         let measure_invocations = std::cell::Cell::new(0usize);
+        let measure_probes = std::cell::Cell::new(0usize);
+        let measure_memo_enabled = !crate::debug_env::disabled().measure_memo;
+        let layout_stats = crate::debug_env::diagnostics().layout;
+        // `IOCRAFT_DEBUG=layout`: the first memo misses of each frame, with
+        // the keys the node had, to tell a key that carries a variable from a
+        // node that simply sees more distinct probes than it has slots.
+        let miss_dump_left = std::cell::Cell::new(if layout_stats { 12usize } else { 0 });
+        // Misses by memo state: empty (node new or just cleared), partial
+        // (still filling), full (all slots held and the key still missed).
+        let miss_empty = std::cell::Cell::new(0usize);
+        let miss_partial = std::cell::Cell::new(0usize);
+        let miss_full = std::cell::Cell::new(0usize);
+        let dirty_before = layout_stats
+            .then(|| count_dirty_layout_nodes(&self.layout_engine, self.wrapper_node_id));
         let alternate_screen_changed = terminal
             .as_deref_mut()
             .map(|term| {
@@ -1574,27 +1794,94 @@ impl<'a> Tree<'a> {
                 // taffy 0.14 (#1091): the measure closure receives LayoutInput
                 // and returns LayoutOutput; compute_leaf_layout preserves the
                 // old leaf-measurement behavior around our Size-based funcs.
-                |inputs, _node_id, node_context, style| {
-                    if node_context
-                        .as_ref()
-                        .is_some_and(|cx| cx.measure_func.is_some())
-                    {
-                        measure_invocations.set(measure_invocations.get() + 1);
-                    }
+                // `measure_invocations` counts the measure functions actually
+                // run; probes answered by the node's MeasureMemo are counted
+                // in `measure_probes`.
+                |inputs, node_id, node_context, style| {
                     taffy::compute_leaf_layout(
                         inputs,
                         style,
                         |_, _| 0.0,
-                        |known_dimensions, available_space| match node_context
-                            .and_then(|cx| cx.measure_func.as_ref())
-                        {
-                            Some(f) => f(known_dimensions, available_space, style),
-                            None => Size::ZERO,
+                        |known_dimensions, available_space| {
+                            let Some(cx) = node_context else {
+                                return Size::ZERO;
+                            };
+                            let Some(f) = cx.measure_func.as_ref() else {
+                                return Size::ZERO;
+                            };
+                            measure_probes.set(measure_probes.get() + 1);
+                            let key = MeasureKey::new(known_dimensions, available_space);
+                            if measure_memo_enabled {
+                                if let Some(size) = cx.measure_memo.get(key) {
+                                    return size;
+                                }
+                                // First definite-width miss: learn the natural
+                                // size once, so every later probe at or above
+                                // it is answered without a measurement.
+                                if key.effective_width().is_some()
+                                    && cx.measure_memo.natural.is_none()
+                                {
+                                    measure_invocations.set(measure_invocations.get() + 1);
+                                    cx.measure_memo.natural = Some(f(
+                                        Size {
+                                            width: None,
+                                            height: None,
+                                        },
+                                        Size {
+                                            width: AvailableSpace::Definite(NATURAL_PROBE_WIDTH),
+                                            height: AvailableSpace::MaxContent,
+                                        },
+                                        style,
+                                    ));
+                                    if let Some(size) = cx.measure_memo.natural_for(key) {
+                                        return size;
+                                    }
+                                }
+                            }
+                            if layout_stats {
+                                let had = cx.measure_memo.keys();
+                                let class = match had.len() {
+                                    0 => &miss_empty,
+                                    n if n >= MEASURE_MEMO_SLOTS - 2 => &miss_full,
+                                    _ => &miss_partial,
+                                };
+                                class.set(class.get() + 1);
+                                if miss_dump_left.get() > 0 && had.len() >= MEASURE_MEMO_SLOTS - 2 {
+                                    miss_dump_left.set(miss_dump_left.get() - 1);
+                                    eprintln!(
+                                        "iocraft-memo-miss node={node_id:?} key={key:?} had={had:?}"
+                                    );
+                                }
+                            }
+                            measure_invocations.set(measure_invocations.get() + 1);
+                            let size = f(known_dimensions, available_space, style);
+                            if measure_memo_enabled {
+                                cx.measure_memo.store(key, size);
+                            }
+                            size
                         },
                     )
                 },
             )
             .expect("we should be able to compute the layout");
+
+        if let Some((dirty, total)) = dirty_before {
+            eprintln!(
+                "iocraft-layout-stats measures={} probes={} miss_empty={} miss_partial={} miss_full={} dirty_before={}/{} set_style={} set_measure={} set_children={} set_children_same={} settle_rounds={}",
+                measure_invocations.get(),
+                measure_probes.get(),
+                miss_empty.get(),
+                miss_partial.get(),
+                miss_full.get(),
+                dirty,
+                total,
+                layout_invalidations.set_style,
+                layout_invalidations.set_measure,
+                layout_invalidations.set_children,
+                layout_invalidations.set_children_same,
+                settle_rounds_taken,
+            );
+        }
 
         debug_dump_layout_tree(&self.layout_engine, self.wrapper_node_id);
         // Whole-tree snapshot walk (every node + a layout-engine lock each)
@@ -2026,6 +2313,24 @@ fn count_changed_cells(prev: Option<&Canvas>, next: &Canvas) -> usize {
         });
     }
     count
+}
+
+/// `IOCRAFT_DEBUG=layout`: (dirty, total) Taffy nodes under `root`, where
+/// dirty means the node's layout cache is empty and it will be re-laid out.
+fn count_dirty_layout_nodes(layout_engine: &LayoutEngine, root: NodeId) -> (usize, usize) {
+    let mut dirty = 0;
+    let mut total = 0;
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        total += 1;
+        if layout_engine.dirty(node).unwrap_or(false) {
+            dirty += 1;
+        }
+        if let Ok(children) = layout_engine.children(node) {
+            stack.extend(children);
+        }
+    }
+    (dirty, total)
 }
 
 /// `IOCRAFT_DEBUG=layout-dump=PATH`: append this frame's layout tree to PATH.

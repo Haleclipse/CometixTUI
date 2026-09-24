@@ -257,13 +257,16 @@ impl Text {
         if columns < 1 {
             return String::new();
         }
-        if columns == 1 {
-            return ELLIPSIS.to_string();
-        }
-
+        // Text that fits is never truncated, whatever the width: a single
+        // column holding a single-column (or empty) line stays as it is
+        // rather than becoming an ellipsis. This also keeps the measure
+        // function's natural-width contract (see `MeasureFunc`).
         let width = crate::canvas::string_display_width(text);
         if width <= columns {
             return text.to_string();
+        }
+        if columns == 1 {
+            return ELLIPSIS.to_string();
         }
 
         match position {
