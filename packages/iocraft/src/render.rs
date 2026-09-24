@@ -45,8 +45,8 @@ pub(crate) struct UpdateContext<'a, 'w> {
 
 /// Opt-in gate for the profiling-only changed-cell count: an O(canvas) scan
 /// that would otherwise dominate profiled frames on large sessions. Enable
-/// with IOCRAFT_PROFILE_CHANGED_CELLS=1 when the analysis actually needs
-/// per-frame changed-cell numbers.
+/// with `IOCRAFT_DEBUG=cells` when the analysis actually needs per-frame
+/// changed-cell numbers.
 fn changed_cell_count_enabled() -> bool {
     #[cfg(test)]
     {
@@ -56,12 +56,7 @@ fn changed_cell_count_enabled() -> bool {
             _ => {}
         }
     }
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("IOCRAFT_PROFILE_CHANGED_CELLS")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    })
+    crate::debug_env::diagnostics().cells
 }
 
 #[cfg(test)]
@@ -731,7 +726,7 @@ struct DrawContext<'a> {
 /// canvas instead of re-drawn (CC Ink's clean-node blit). On by default since
 /// an A/B against the full-traversal draw showed no visible cell difference
 /// on a resumed 2M session (screen + scrollback, 13 interaction checkpoints);
-/// `IOCRAFT_RETAINED_BLIT=0` (or `false`) is the kill-switch.
+/// `IOCRAFT_DISABLE=retained-blit` is the kill-switch.
 fn retained_blit_enabled() -> bool {
     #[cfg(test)]
     {
@@ -741,12 +736,7 @@ fn retained_blit_enabled() -> bool {
             _ => {}
         }
     }
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("IOCRAFT_RETAINED_BLIT")
-            .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
-            .unwrap_or(true)
-    })
+    !crate::debug_env::disabled().retained_blit
 }
 
 /// 0 = no override, 1 = forced off, 2 = forced on. Tests cannot rely on the
@@ -2040,13 +2030,11 @@ fn count_changed_cells(prev: Option<&Canvas>, next: &Canvas) -> usize {
     count
 }
 
+/// `IOCRAFT_DEBUG=layout-dump=PATH`: append this frame's layout tree to PATH.
 fn debug_dump_layout_tree(layout_engine: &LayoutEngine, root_node_id: NodeId) {
-    let Ok(path) = std::env::var("IOCRAFT_LAYOUT_DUMP") else {
+    let Some(path) = crate::debug_env::diagnostics().layout_dump.as_ref() else {
         return;
     };
-    if path.is_empty() {
-        return;
-    }
     let mut buf = String::new();
     fn rec(layout_engine: &LayoutEngine, node_id: NodeId, depth: usize, buf: &mut String) {
         if let Ok(layout) = layout_engine.layout(node_id) {
@@ -2099,6 +2087,8 @@ fn debug_dump_layout_tree(layout_engine: &LayoutEngine, root_node_id: NodeId) {
         .and_then(|mut file| std::io::Write::write_all(&mut file, buf.as_bytes()));
 }
 
+/// `IOCRAFT_DEBUG=frame-log=PATH`: append one line per frame to PATH with the
+/// canvas geometry, the repaint reason inputs, and the trailing blank rows.
 fn debug_log_render_frame(
     output: &RenderOutput,
     prev_canvas: Option<&Canvas>,
@@ -2106,7 +2096,7 @@ fn debug_log_render_frame(
     terminal_size_changed: bool,
     changed_cells: usize,
 ) {
-    let Ok(path) = std::env::var("IOCRAFT_FRAME_LOG") else {
+    let Some(path) = crate::debug_env::diagnostics().frame_log.as_ref() else {
         return;
     };
 
@@ -2145,26 +2135,6 @@ fn debug_log_render_frame(
         last_nonblank_row,
         trailing_blank_rows,
     );
-
-    if trailing_blank_rows > 20 {
-        if let Ok(dump_path) = std::env::var("IOCRAFT_FRAME_DUMP") {
-            if let Ok(mut dump) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(dump_path)
-            {
-                let _ = writeln!(
-                    dump,
-                    "\n--- canvas {}x{} last_nonblank={} trailing_blank={} ---",
-                    output.canvas.width(),
-                    output.canvas.height(),
-                    last_nonblank_row,
-                    trailing_blank_rows,
-                );
-                let _ = writeln!(dump, "{}", canvas_text);
-            }
-        }
-    }
 }
 
 fn classify_debug_repaint_reason(

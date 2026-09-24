@@ -319,15 +319,10 @@ static INSTALL_PANIC_HOOK: std::sync::Once = std::sync::Once::new();
 /// configured to use.
 // Diagnostic kill-switch for the inline diff damage-skip fast path. The skip
 // is sound only while every canvas write path marks its rows; set
-// IOCRAFT_DIFF_DAMAGE_SKIP=0 to force full per-row scans when bisecting
+// `IOCRAFT_DISABLE=damage-skip` to force full per-row scans when bisecting
 // stale-output artifacts.
 fn damage_skip_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("IOCRAFT_DIFF_DAMAGE_SKIP")
-            .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
-            .unwrap_or(true)
-    })
+    !crate::debug_env::disabled().damage_skip
 }
 
 fn restore_terminal_for_panic() {

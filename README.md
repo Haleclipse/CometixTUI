@@ -177,6 +177,27 @@ fn main() {
 
 114 examples are available in the [`examples/`](examples/) directory, covering focus management, event propagation, forms, fullscreen apps, selection, search, scroll containers, retained rendering, terminal capabilities, and more.
 
+## Environment Variables
+
+Two diagnostic variables, each a comma-separated list of tokens, read once per process. Neither is needed for normal use; unknown tokens are ignored.
+
+| Variable | Token | Effect |
+|---|---|---|
+| `IOCRAFT_DISABLE` | `push-wake` | Poll every component every frame instead of only the woken paths |
+| | `retained-blit` | Re-draw memo-retained subtrees instead of blitting them from the previous canvas |
+| | `damage-skip` | Diff every row instead of only the rows a canvas write marked |
+| `IOCRAFT_DEBUG` | `settle` | Print each component whose render-phase state write re-ran the update |
+| | `cells` | Count changed cells per frame for the render profile |
+| | `frame-log=PATH` | Append one line per frame describing the canvas and the repaint to PATH |
+| | `layout-dump=PATH` | Append every frame's layout tree to PATH |
+
+`IOCRAFT_DISABLE` tokens are kill-switches for optimizations that are on by default; use them to bisect a rendering artifact back to the pass that introduced it. `IOCRAFT_DEBUG` tokens cost per frame and are off by default.
+
+```sh
+IOCRAFT_DISABLE=push-wake,retained-blit cargo run --example fullscreen
+IOCRAFT_DEBUG=settle,frame-log=/tmp/frames.log cargo run --example fullscreen
+```
+
 ## Upstream Relationship
 
 - **origin**: `Haleclipse/CometixTUI` (this fork)

@@ -109,6 +109,7 @@ mod canvas;
 mod clipboard;
 mod component;
 mod context;
+mod debug_env;
 mod element;
 mod focus;
 mod handler;

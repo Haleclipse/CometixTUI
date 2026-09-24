@@ -32,7 +32,7 @@ pub trait Hook: Unpin + Send {
         false
     }
 
-    /// Name shown by `IOCRAFT_SETTLE_TRACE` when this hook reports a
+    /// Name shown by `IOCRAFT_DEBUG=settle` when this hook reports a
     /// render-phase change; state cells return their value type.
     fn settle_trace_name(&self) -> Option<&'static str> {
         None

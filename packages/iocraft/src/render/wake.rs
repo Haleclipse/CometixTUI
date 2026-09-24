@@ -1,6 +1,6 @@
 //! Push-mode wake routing for the component tree (dirty-path rendering, Phase W).
 //!
-//! In pull mode (`IOCRAFT_PUSH_WAKE=0`), every frame re-polls every component's
+//! In pull mode (`IOCRAFT_DISABLE=push-wake`), every frame re-polls every component's
 //! hooks so each hook re-registers the render loop's waker — O(tree) work per
 //! frame even when nothing changed. In push mode (the default), each component
 //! polls its own hooks through a per-component proxy waker: a wake marks that
@@ -23,8 +23,8 @@ use std::sync::{
 };
 use std::task::Wake;
 
-/// Gate for push-mode wake routing. On by default; `IOCRAFT_PUSH_WAKE=0` (or
-/// `false`) restores pull mode as a kill-switch. Both this crate's suite and
+/// Gate for push-mode wake routing. On by default; `IOCRAFT_DISABLE=push-wake`
+/// restores pull mode as a kill-switch. Both this crate's suite and
 /// CometixCode's pass under either mode: the tests that had depended on pull
 /// mode's frame cadence (a `State` bumped during render committing as its own
 /// frame, a passive component being polled every frame) were rewritten to be
@@ -38,12 +38,7 @@ pub(crate) fn push_wake_enabled() -> bool {
             _ => {}
         }
     }
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("IOCRAFT_PUSH_WAKE")
-            .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
-            .unwrap_or(true)
-    })
+    !crate::debug_env::disabled().push_wake
 }
 
 // 0 = no override, 1 = forced off, 2 = forced on. Thread-local (not a
@@ -56,16 +51,11 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
-/// `IOCRAFT_SETTLE_TRACE=1`: print the type name of every component whose
+/// `IOCRAFT_DEBUG=settle`: print the type name of every component whose
 /// render-phase state write makes the settle pass re-run the update. Each
 /// line is one extra update per frame for that component's subtree.
 pub(crate) fn settle_trace_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("IOCRAFT_SETTLE_TRACE")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    })
+    crate::debug_env::diagnostics().settle
 }
 
 #[cfg(test)]
