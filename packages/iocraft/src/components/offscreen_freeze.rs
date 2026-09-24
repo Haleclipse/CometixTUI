@@ -368,8 +368,10 @@ mod tests {
         // Frame 1 draws the wrapper offscreen; frame 2's update sees `frozen`.
         // By this render the freeze has been in effect for a whole wait.
         if tick == 2 {
-            DEFAULT_POLL_CHILD_POLLS_WHEN_FROZEN
-                .store(DEFAULT_POLL_CHILD_POLLS.load(Ordering::SeqCst), Ordering::SeqCst);
+            DEFAULT_POLL_CHILD_POLLS_WHEN_FROZEN.store(
+                DEFAULT_POLL_CHILD_POLLS.load(Ordering::SeqCst),
+                Ordering::SeqCst,
+            );
         }
         if tick >= 4 {
             system.exit();
@@ -396,8 +398,10 @@ mod tests {
         let mut system = hooks.use_context_mut::<SystemContext>();
         let tick = use_frame_clock(&mut hooks);
         if tick == 2 {
-            SKIP_POLL_CHILD_POLLS_WHEN_FROZEN
-                .store(SKIP_POLL_CHILD_POLLS.load(Ordering::SeqCst), Ordering::SeqCst);
+            SKIP_POLL_CHILD_POLLS_WHEN_FROZEN.store(
+                SKIP_POLL_CHILD_POLLS.load(Ordering::SeqCst),
+                Ordering::SeqCst,
+            );
         }
         if tick >= 4 {
             system.exit();

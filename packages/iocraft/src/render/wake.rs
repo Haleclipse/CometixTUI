@@ -434,10 +434,7 @@ mod settle_tests {
             .collect::<Vec<_>>()
             .await;
         super::set_push_wake_for_tests(None);
-        assert!(
-            frames.last().unwrap().contains("mirrored=3"),
-            "{frames:?}"
-        );
+        assert!(frames.last().unwrap().contains("mirrored=3"), "{frames:?}");
         let rounds = rounds.lock().unwrap().clone();
         assert!(
             rounds.iter().all(|&r| r == 0),
@@ -630,9 +627,9 @@ mod scan_tests {
             .map(|_| TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('a'))));
         let canvases: Vec<_> = smol::block_on(
             element!(KeyCounterApp)
-                .mock_terminal_render_loop(MockTerminalConfig::with_events(
-                    futures::stream::iter(keys),
-                ))
+                .mock_terminal_render_loop(MockTerminalConfig::with_events(futures::stream::iter(
+                    keys,
+                )))
                 .collect(),
         );
         super::set_push_wake_for_tests(None);
@@ -704,6 +701,9 @@ mod scan_tests {
                 panic!("render loop parked: a late-mounted component was never scanned")
             }
         };
-        assert!(frames.last().unwrap().contains("late ticks=2"), "{frames:?}");
+        assert!(
+            frames.last().unwrap().contains("late ticks=2"),
+            "{frames:?}"
+        );
     }
 }

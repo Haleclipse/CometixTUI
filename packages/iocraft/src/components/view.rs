@@ -1771,150 +1771,153 @@ impl Component for View {
         // Mouse only, but for every view: the topmost hit view runs the click
         // dispatch (bubbling through the registry) and the focus hand-off, so
         // even a view without handlers must see the mouse when it is the target.
-        hooks.use_propagated_terminal_events_for(crate::TerminalEventInterest::MOUSE, move |event| {
-            let TerminalEvent::FullscreenMouse(FullscreenMouseEvent {
-                column,
-                row,
-                kind,
-                cell_is_blank,
-                ..
-            }) = event.event()
-            else {
-                return;
-            };
+        hooks.use_propagated_terminal_events_for(
+            crate::TerminalEventInterest::MOUSE,
+            move |event| {
+                let TerminalEvent::FullscreenMouse(FullscreenMouseEvent {
+                    column,
+                    row,
+                    kind,
+                    cell_is_blank,
+                    ..
+                }) = event.event()
+                else {
+                    return;
+                };
 
-            let rect = *rect_for_click
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let Some(rect) = rect else {
-                return;
-            };
-            let inside = (*column as i32) >= rect.left
-                && (*column as i32) < rect.right
-                && (*row as i32) >= rect.top
-                && (*row as i32) < rect.bottom;
-            let records = click_registry
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone();
-            let target_record = records.iter().rev().find(|record| {
-                record
-                    .rect
+                let rect = *rect_for_click
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let Some(rect) = rect else {
+                    return;
+                };
+                let inside = (*column as i32) >= rect.left
+                    && (*column as i32) < rect.right
+                    && (*row as i32) >= rect.top
+                    && (*row as i32) < rect.bottom;
+                let records = click_registry
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .as_ref()
-                    .is_some_and(|rect| {
-                        (*column as i32) >= rect.left
-                            && (*column as i32) < rect.right
-                            && (*row as i32) >= rect.top
-                            && (*row as i32) < rect.bottom
-                    })
-            });
-            if target_record.is_none_or(|record| record.id != view_id) {
-                return;
-            }
-
-            let mut pending = pending_click
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            match *kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    if inside {
-                        *pending = Some(PendingClick {
-                            column: *column,
-                            row: *row,
-                            dragged: false,
-                        });
-                    } else {
-                        *pending = None;
-                    }
+                    .clone();
+                let target_record = records.iter().rev().find(|record| {
+                    record
+                        .rect
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .as_ref()
+                        .is_some_and(|rect| {
+                            (*column as i32) >= rect.left
+                                && (*column as i32) < rect.right
+                                && (*row as i32) >= rect.top
+                                && (*row as i32) < rect.bottom
+                        })
+                });
+                if target_record.is_none_or(|record| record.id != view_id) {
+                    return;
                 }
-                MouseEventKind::Drag(MouseButton::Left) => {
-                    if let Some(click) = pending.as_mut() {
-                        if click.column != *column || click.row != *row {
-                            click.dragged = true;
+
+                let mut pending = pending_click
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match *kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if inside {
+                            *pending = Some(PendingClick {
+                                column: *column,
+                                row: *row,
+                                dragged: false,
+                            });
+                        } else {
+                            *pending = None;
                         }
                     }
-                }
-                MouseEventKind::Up(MouseButton::Left) => {
-                    let click = pending.take();
-                    if let Some(click) = click {
-                        if inside && !click.dragged {
-                            // Match CC Ink's dispatchClick: click-to-focus is part of
-                            // the completed release-click, not the initial mouse down.
-                            // A drag that started on a focusable view must not steal focus.
-                            let mut focus_cursor = target_record.map(|record| record.id);
-                            while let Some(current) = focus_cursor {
-                                let Some(record) =
-                                    records.iter().find(|record| record.id == current)
-                                else {
-                                    break;
-                                };
-                                if let Some((id, ctx)) = record.focus {
-                                    ctx.focus(id);
-                                    break;
-                                }
-                                focus_cursor = record.parent;
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if let Some(click) = pending.as_mut() {
+                            if click.column != *column || click.row != *row {
+                                click.dragged = true;
                             }
+                        }
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        let click = pending.take();
+                        if let Some(click) = click {
+                            if inside && !click.dragged {
+                                // Match CC Ink's dispatchClick: click-to-focus is part of
+                                // the completed release-click, not the initial mouse down.
+                                // A drag that started on a focusable view must not steal focus.
+                                let mut focus_cursor = target_record.map(|record| record.id);
+                                while let Some(current) = focus_cursor {
+                                    let Some(record) =
+                                        records.iter().find(|record| record.id == current)
+                                    else {
+                                        break;
+                                    };
+                                    if let Some((id, ctx)) = record.focus {
+                                        ctx.focus(id);
+                                        break;
+                                    }
+                                    focus_cursor = record.parent;
+                                }
 
-                            let click_event = ViewClickEvent::new(
-                                *column,
-                                *row,
-                                (*column as i32 - rect.left) as u16,
-                                (*row as i32 - rect.top) as u16,
-                                *cell_is_blank,
-                            );
-                            let stopped = click_event.stopped.clone();
-                            let target = Some(view_id);
-                            let mut handled = false;
-                            let mut current = Some(view_id);
-                            while let Some(current_id) = current {
-                                let Some(record) =
-                                    records.iter().find(|record| record.id == current_id)
-                                else {
-                                    break;
-                                };
-                                if let Some(handler_ref) = &record.handler {
-                                    let handler_rect = *record
-                                        .rect
-                                        .lock()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                    if let Some(handler_rect) = handler_rect {
-                                        handled = true;
-                                        let phase = if record.id == view_id {
-                                            ViewEventPhase::AtTarget
-                                        } else {
-                                            ViewEventPhase::Bubbling
-                                        };
-                                        let mut handler = handler_ref
+                                let click_event = ViewClickEvent::new(
+                                    *column,
+                                    *row,
+                                    (*column as i32 - rect.left) as u16,
+                                    (*row as i32 - rect.top) as u16,
+                                    *cell_is_blank,
+                                );
+                                let stopped = click_event.stopped.clone();
+                                let target = Some(view_id);
+                                let mut handled = false;
+                                let mut current = Some(view_id);
+                                while let Some(current_id) = current {
+                                    let Some(record) =
+                                        records.iter().find(|record| record.id == current_id)
+                                    else {
+                                        break;
+                                    };
+                                    if let Some(handler_ref) = &record.handler {
+                                        let handler_rect = *record
+                                            .rect
                                             .lock()
                                             .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                        handler(click_event.clone().for_dispatch(
-                                            phase,
-                                            target,
-                                            Some(record.id),
-                                            (*column as i32 - handler_rect.left) as u16,
-                                            (*row as i32 - handler_rect.top) as u16,
-                                        ));
+                                        if let Some(handler_rect) = handler_rect {
+                                            handled = true;
+                                            let phase = if record.id == view_id {
+                                                ViewEventPhase::AtTarget
+                                            } else {
+                                                ViewEventPhase::Bubbling
+                                            };
+                                            let mut handler = handler_ref
+                                                .lock()
+                                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                            handler(click_event.clone().for_dispatch(
+                                                phase,
+                                                target,
+                                                Some(record.id),
+                                                (*column as i32 - handler_rect.left) as u16,
+                                                (*row as i32 - handler_rect.top) as u16,
+                                            ));
+                                        }
                                     }
+                                    if stopped.load(Ordering::SeqCst) {
+                                        break;
+                                    }
+                                    current = record.parent;
                                 }
-                                if stopped.load(Ordering::SeqCst) {
-                                    break;
+                                if handled || stopped.load(Ordering::SeqCst) {
+                                    event.stop_component_propagation();
                                 }
-                                current = record.parent;
-                            }
-                            if handled || stopped.load(Ordering::SeqCst) {
-                                event.stop_component_propagation();
                             }
                         }
                     }
+                    MouseEventKind::Down(_) => {
+                        *pending = None;
+                    }
+                    _ => {}
                 }
-                MouseEventKind::Down(_) => {
-                    *pending = None;
-                }
-                _ => {}
-            }
-        });
+            },
+        );
 
         let mut style: taffy::style::Style = props.layout_style().into();
         style.border = if self.border_style.is_none() {

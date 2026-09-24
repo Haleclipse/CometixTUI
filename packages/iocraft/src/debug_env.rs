@@ -99,8 +99,7 @@ pub(crate) fn disabled() -> &'static Disabled {
 /// The `IOCRAFT_DEBUG` list, parsed on first use.
 pub(crate) fn diagnostics() -> &'static Diagnostics {
     static DIAGNOSTICS: OnceLock<Diagnostics> = OnceLock::new();
-    DIAGNOSTICS
-        .get_or_init(|| Diagnostics::parse(std::env::var("IOCRAFT_DEBUG").ok().as_deref()))
+    DIAGNOSTICS.get_or_init(|| Diagnostics::parse(std::env::var("IOCRAFT_DEBUG").ok().as_deref()))
 }
 
 #[cfg(test)]

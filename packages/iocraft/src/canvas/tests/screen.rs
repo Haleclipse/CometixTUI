@@ -839,7 +839,10 @@ fn test_overlay_and_no_select_rows_are_copy_on_write() {
         canvas.overlays[0][1].is_some(),
         "clearing the copy must not clear the shared source row"
     );
-    assert!(canvas == canvas.clone(), "row sharing keeps equality intact");
+    assert!(
+        canvas == canvas.clone(),
+        "row sharing keeps equality intact"
+    );
 }
 
 #[test]

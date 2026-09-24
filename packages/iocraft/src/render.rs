@@ -852,8 +852,7 @@ impl ComponentDrawer<'_> {
             return false;
         }
         if let Some(cursor) = prev.cursor_declaration() {
-            let cx = cursor.x as usize;
-            let cy = cursor.y as usize;
+            let (cx, cy) = (cursor.x, cursor.y);
             if cx >= x && cx < x + width && cy >= y && cy < y + height {
                 return false;
             }
@@ -1620,8 +1619,7 @@ impl<'a> Tree<'a> {
             .unwrap_or(wrapper_layout.size.height as usize);
         let canvas_alloc_start = profile_enabled.then(std::time::Instant::now);
         let mut canvas = Canvas::new(canvas_width, canvas_height);
-        let canvas_alloc =
-            canvas_alloc_start.map_or(Duration::ZERO, |start| start.elapsed());
+        let canvas_alloc = canvas_alloc_start.map_or(Duration::ZERO, |start| start.elapsed());
         let mut deferred_no_select = Vec::new();
         let root_layout = self
             .layout_engine

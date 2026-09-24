@@ -1102,14 +1102,8 @@ impl Canvas {
                 damage_max_x = damage_max_x.max(max_x + 1);
             }
 
-            let cells_row = self.cells_row_mut(row);
-            for col in x..max_x {
-                cells_row[col] = CanvasCell::default();
-            }
-            let overlays_row = self.overlays_row_mut(row);
-            for col in x..max_x {
-                overlays_row[col] = None;
-            }
+            self.cells_row_mut(row)[x..max_x].fill_with(CanvasCell::default);
+            self.overlays_row_mut(row)[x..max_x].fill_with(|| None);
         }
 
         self.mark_damage(DamageRegion {
@@ -1208,8 +1202,7 @@ impl Canvas {
                 self.no_select[row] = std::sync::Arc::clone(&src.no_select[row]);
             } else {
                 self.cells_row_mut(row)[x..max_x].clone_from_slice(&src.cells[row][x..max_x]);
-                self.overlays_row_mut(row)[x..max_x]
-                    .clone_from_slice(&src.overlays[row][x..max_x]);
+                self.overlays_row_mut(row)[x..max_x].clone_from_slice(&src.overlays[row][x..max_x]);
                 self.no_select_row_mut(row)[x..max_x]
                     .clone_from_slice(&src.no_select[row][x..max_x]);
             }

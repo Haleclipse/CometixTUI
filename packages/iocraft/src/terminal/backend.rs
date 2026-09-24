@@ -1340,7 +1340,11 @@ impl<'a> StdTerminal<'a> {
         next.1 < prev.1 || (prev.0 != 0 && next.0 != prev.0)
     }
 
-    pub(super) fn inline_shrink_requires_full_rewrite(&self, prev_height: usize, new_height: usize) -> bool {
+    pub(super) fn inline_shrink_requires_full_rewrite(
+        &self,
+        prev_height: usize,
+        new_height: usize,
+    ) -> bool {
         if self.fullscreen || new_height >= prev_height {
             return false;
         }

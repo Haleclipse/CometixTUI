@@ -206,9 +206,12 @@ mod tests {
     use futures::{channel::oneshot, executor::block_on};
     use std::collections::VecDeque;
 
+    /// (program, args, input, timeout) of one `execute` call.
+    type Call = (String, Vec<String>, String, Duration);
+
     #[derive(Default)]
     struct Backend {
-        calls: Mutex<Vec<(String, Vec<String>, String, Duration)>>,
+        calls: Mutex<Vec<Call>>,
         replies: Mutex<VecDeque<BoxFuture<'static, i32>>>,
         tasks: Mutex<Vec<BoxFuture<'static, ()>>>,
     }

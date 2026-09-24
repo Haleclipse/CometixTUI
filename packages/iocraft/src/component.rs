@@ -266,9 +266,7 @@ impl InstantiatedComponent {
                 };
                 if self.subtree_retained && single_child {
                     if let Some(rect) = subtree_rect {
-                        if self.cached_blit_bounds == Some(rect)
-                            && drawer.try_retained_blit(rect)
-                        {
+                        if self.cached_blit_bounds == Some(rect) && drawer.try_retained_blit(rect) {
                             return;
                         }
                     }
@@ -336,9 +334,7 @@ impl InstantiatedComponent {
             return false;
         }
         let mut settled = false;
-        if self.wake_state.is_dirty()
-            && self.hooks.settle_render_phase_change(&self.proxy_waker)
-        {
+        if self.wake_state.is_dirty() && self.hooks.settle_render_phase_change(&self.proxy_waker) {
             self.pending_change = true;
             settled = true;
             if settle_trace_enabled() {
