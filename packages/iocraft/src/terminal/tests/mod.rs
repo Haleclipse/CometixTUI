@@ -23,6 +23,32 @@ impl Write for TestWriter {
 }
 
 #[test]
+fn test_event_cell_snapshot_follows_mouse_capture() {
+    let mut terminal = Terminal::new(
+        Box::new(TestWriter::default()),
+        Box::new(TestWriter::default()),
+        Output::Stdout,
+        false,
+        false,
+    )
+    .unwrap();
+    let canvas = Canvas::new(4, 2);
+
+    // Inline, no capture: nothing can click, so nothing is scanned.
+    terminal.set_event_cell_snapshot(&canvas);
+    assert!(!terminal.has_event_cell_snapshot());
+
+    terminal.enable_mouse_capture().unwrap();
+    terminal.set_event_cell_snapshot(&canvas);
+    assert!(terminal.has_event_cell_snapshot());
+
+    // Capture off again drops the stale snapshot rather than keeping it.
+    terminal.disable_mouse_capture().unwrap();
+    terminal.set_event_cell_snapshot(&canvas);
+    assert!(!terminal.has_event_cell_snapshot());
+}
+
+#[test]
 fn test_terminal_set_clipboard_writes_raw_osc52_without_sync_update() {
     let stdout = TestWriter::default();
     let stderr = TestWriter::default();

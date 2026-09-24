@@ -454,8 +454,24 @@ impl<'a> Terminal<'a> {
 
     /// Updates the retained screen-buffer metadata used to annotate mouse events
     /// with CC Ink-style blank-cell information.
+    ///
+    /// Skipped — and any stale snapshot dropped — while the terminal is not
+    /// reporting the mouse. The snapshot is an O(canvas) scan per frame and
+    /// only ever serves mouse events; inline mode never enables tracking (CC
+    /// does so only inside its alternate screen), so on a long inline
+    /// session it was a quarter of every frame spent on events that could
+    /// not arrive.
     pub fn set_event_cell_snapshot(&mut self, canvas: &Canvas) {
+        if !self.inner.mouse_events_possible() {
+            self.event_cell_snapshot = None;
+            return;
+        }
         self.event_cell_snapshot = Some(EventCellSnapshot::from_canvas(canvas));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_event_cell_snapshot(&self) -> bool {
+        self.event_cell_snapshot.is_some()
     }
 
     fn annotate_terminal_event(

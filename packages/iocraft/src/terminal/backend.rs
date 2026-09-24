@@ -10,6 +10,13 @@ pub(super) trait TerminalImpl: Write + Send {
         Ok(())
     }
 
+    /// Whether mouse events can arrive from this backend at all. A real
+    /// terminal only reports the mouse while capture is enabled; mocks feed
+    /// events directly, so they answer `true`.
+    fn mouse_events_possible(&self) -> bool {
+        true
+    }
+
     /// Re-asserts terminal modes that some emulators drop during resize.
     fn reassert_after_resize(&mut self) -> io::Result<()> {
         Ok(())
@@ -472,6 +479,10 @@ impl TerminalImpl for StdTerminal<'_> {
             }
         }
         Ok(())
+    }
+
+    fn mouse_events_possible(&self) -> bool {
+        self.mouse_capture
     }
 
     fn reassert_after_resize(&mut self) -> io::Result<()> {
