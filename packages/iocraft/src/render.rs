@@ -1622,6 +1622,16 @@ impl<'a> Tree<'a> {
             .as_deref()
             .map(Terminal::exit_on_ctrl_c)
             .unwrap_or(true);
+        // `ClockProvider` sets the clock's base tick from `useTerminalFocus`;
+        // an unknown focus state counts as focused, as there.
+        let terminal_focused = terminal
+            .as_deref()
+            .and_then(Terminal::terminal_focus_state)
+            .unwrap_or(true);
+        self.clock
+            .set_tick_interval(crate::components::clock_context::tick_interval_for_focus(
+                terminal_focused,
+            ));
         let mut wrapper_child_node_ids = vec![self.root_component.node_id()];
         let mut did_clear_terminal_output = false;
         let mut force_full_repaint = false;

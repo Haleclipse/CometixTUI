@@ -7,8 +7,8 @@ use core::{
 use futures_timer::Delay;
 use std::time::Duration;
 
-use super::{TerminalViewportEntry, UseContext, UseState, UseTerminalFocus, UseTerminalViewport};
-use crate::components::{clock_context, Clock};
+use super::{TerminalViewportEntry, UseContext, UseState, UseTerminalViewport};
+use crate::components::Clock;
 
 mod private {
     pub trait Sealed {}
@@ -26,19 +26,21 @@ pub struct AnimationFrameState {
 
 /// Hook for synchronized, pausable animations.
 ///
-/// This follows the CC Ink fork's `useAnimationFrame(...)` intent: animations
-/// stop ticking when their component is outside the live terminal viewport, and
-/// the clock slows while terminal focus is lost instead of fully stopping.
+/// This follows CC Ink's `useAnimationFrame(...)`: animations stop ticking
+/// when their component is outside the live terminal viewport, and "the clock
+/// automatically slows when the terminal is blurred, so consumers don't need
+/// to handle focus state" — the render root halves the [`Clock`]'s base tick.
 pub trait UseAnimationFrame: private::Sealed {
     /// Returns the current animation state, ticking at `interval` while active.
     fn use_animation_frame(&mut self, interval: Option<Duration>) -> AnimationFrameState;
 
-    /// Calls `callback` every `interval` on the tree's [`Clock`] grid (see
-    /// [`Clock::delay_to_next`]): every animation with the same interval
-    /// ticks at the same instants and shares a frame, as subscribers of CC
-    /// Ink's single `ClockContext` do. `use_animation_frame` is built on it.
-    /// Use [`use_interval`](super::UseInterval::use_interval) for timers
-    /// whose phase should count from the moment they start.
+    /// Calls `callback` every [`Clock::period`]`(interval)` on the tree's
+    /// [`Clock`] grid (see [`Clock::delay_to_next`]): every animation with
+    /// the same interval ticks at the same instants and shares a frame, as
+    /// subscribers of CC Ink's single `ClockContext` do, and the interval is
+    /// quantized to the clock's base tick as theirs is. `use_animation_frame`
+    /// is built on it. Use [`use_interval`](super::UseInterval::use_interval)
+    /// for timers whose phase should count from the moment they start.
     ///
     /// Passing `None` pauses the timer. Without a clock in context (CC:
     /// `clock` is `null`) the timer never ticks.
@@ -53,12 +55,7 @@ impl UseAnimationFrame for Hooks<'_, '_> {
         // ClockProvider); CC reads `clock?.now() ?? 0` when there is none.
         let clock = self.try_use_context::<Clock>().map(|clock| clock.clone());
         let viewport = self.use_terminal_viewport();
-        let focused = self.use_terminal_focus();
-        let active_interval = if viewport.is_visible {
-            interval.map(|interval| clock_context::tick_interval(interval, focused))
-        } else {
-            None
-        };
+        let active_interval = if viewport.is_visible { interval } else { None };
         let time = {
             let clock = clock.clone();
             self.use_state(move || clock.as_ref().map_or(0, Clock::now_ms))
@@ -252,7 +249,7 @@ mod tests {
             last_first.set(first.time_ms);
             first_ticks.set(first_ticks.get() + 1);
         }
-        let mut done = hooks.use_state(|| false);
+        let done = hooks.use_state(|| false);
         let mut done_for_future = done;
         hooks.use_future(async move {
             smol::Timer::after(Duration::from_millis(560)).await;
@@ -292,19 +289,23 @@ mod tests {
             .find_map(|line| line.strip_prefix("first_ticks="))
             .and_then(|value| value.parse::<u32>().ok())
             .expect("tick count");
-        // 560ms at 100ms per tick: the initial read plus 5 grid lines, ±1 for
-        // where the epoch falls relative to the grid.
+        // 100ms quantizes to the 112ms period on the 16ms base tick; 560ms
+        // holds the initial read plus 4–5 grid lines, ±1 for where the epoch
+        // falls relative to the grid.
         assert!(
-            (5..=7).contains(&ticks),
+            (4..=7).contains(&ticks),
             "ticks={ticks} rendered={rendered:?}"
         );
-        // Both animations report a multiple-of-100 clock reading once they
-        // have ticked on the grid (the late one mounted off-grid).
+        // The late animation mounted off-grid (just after the first 112ms
+        // line) and must have ticked at least once since; a tick reads the
+        // clock when its `Delay` fires, a few ms after the grid line under
+        // test load.
         let late = rendered
             .lines()
             .find_map(|line| line.strip_prefix("late_time="))
             .and_then(|value| value.parse::<u128>().ok())
             .expect("late time");
-        assert!(late % 100 <= 3, "late animation not on the grid: {late}");
+        assert!(late >= 224, "late animation never ticked: {late}");
+        assert!(late % 112 <= 20, "late animation not on the grid: {late}");
     }
 }
