@@ -5,25 +5,14 @@ use core::{
     task::{Context, Poll},
 };
 use futures_timer::Delay;
-use std::{
-    sync::OnceLock,
-    time::{Duration, Instant},
-};
+use std::time::Duration;
 
-use super::UseState;
+use super::{UseAnimationFrame, UseContext, UseState};
+use crate::components::Clock;
 
 mod private {
     pub trait Sealed {}
     impl Sealed for crate::Hooks<'_, '_> {}
-}
-
-static SHARED_CLOCK_START: OnceLock<Instant> = OnceLock::new();
-
-pub(crate) fn shared_clock_now_ms() -> u128 {
-    SHARED_CLOCK_START
-        .get_or_init(Instant::now)
-        .elapsed()
-        .as_millis()
 }
 
 /// Interval and animation-timer hooks.
@@ -74,17 +63,26 @@ impl UseInterval for Hooks<'_, '_> {
     }
 
     fn use_animation_timer_opt(&mut self, interval: Option<Duration>) -> u128 {
-        let now = self.use_state(|| {
-            if interval.is_some() {
-                shared_clock_now_ms()
-            } else {
-                0
-            }
-        });
+        // CC `useAnimationTimer` subscribes to the clock like
+        // `useAnimationFrame` (non-keepAlive); it reads the tree's clock and
+        // ticks on its grid.
+        let clock = self.try_use_context::<Clock>().map(|clock| clock.clone());
+        let now = {
+            let clock = clock.clone();
+            self.use_state(move || {
+                if interval.is_some() {
+                    clock.as_ref().map_or(0, Clock::now_ms)
+                } else {
+                    0
+                }
+            })
+        };
         let mut now_for_callback = now;
-        self.use_interval(
+        self.use_animation_interval(
             move || {
-                now_for_callback.set(shared_clock_now_ms());
+                if let Some(clock) = &clock {
+                    now_for_callback.set(clock.now_ms());
+                }
             },
             interval,
         );

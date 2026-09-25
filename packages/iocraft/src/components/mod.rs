@@ -13,6 +13,9 @@ pub use cached_subtree::*;
 mod checkbox;
 pub use checkbox::*;
 
+pub mod clock_context;
+pub use clock_context::Clock;
+
 mod context_provider;
 pub use context_provider::*;
 

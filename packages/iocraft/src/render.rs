@@ -1568,6 +1568,9 @@ struct Tree<'a> {
     root_component_props: AnyProps<'a>,
     system_context: SystemContext,
     root_view_event_context: crate::components::ViewFocusParentContext,
+    // One animation clock per tree, provided at the root the way Ink's own
+    // root `App` mounts `ClockProvider` (CC `ink/components/App.tsx:219`).
+    clock: crate::components::Clock,
     prev_layout_snapshots: HashMap<NodeId, LayoutSnapshot>,
 }
 
@@ -1601,6 +1604,7 @@ impl<'a> Tree<'a> {
             root_component_props: props,
             system_context: SystemContext::new(),
             root_view_event_context: crate::components::ViewFocusParentContext::shared_root(),
+            clock: crate::components::Clock::new(),
             prev_layout_snapshots: HashMap::new(),
         }
     }
@@ -1658,11 +1662,16 @@ impl<'a> Tree<'a> {
                         component_context_stack.with_context(
                             Some(Context::owned(self.root_view_event_context.clone())),
                             |component_context_stack| {
-                                self.root_component.update(
-                                    &mut context,
-                                    &mut wrapper_child_node_ids,
-                                    component_context_stack,
-                                    self.root_component_props.borrow(),
+                                component_context_stack.with_context(
+                                    Some(Context::owned(self.clock.clone())),
+                                    |component_context_stack| {
+                                        self.root_component.update(
+                                            &mut context,
+                                            &mut wrapper_child_node_ids,
+                                            component_context_stack,
+                                            self.root_component_props.borrow(),
+                                        );
+                                    },
                                 );
                             },
                         );
