@@ -190,6 +190,7 @@ Two diagnostic variables, each a comma-separated list of tokens, read once per p
 | `IOCRAFT_DEBUG` | `settle` | Print each component whose render-phase state write re-ran the update |
 | | `cells` | Count changed cells per frame for the render profile |
 | | `layout` | Print per-frame layout statistics to stderr: measure functions run, probes answered, dirty nodes before layout, cache invalidations by entry point |
+| | `wake` | Print, for every component the poll pass finds changed, which hook slots reported Ready: the writers behind each frame |
 | | `frame-log=PATH` | Append one line per frame describing the canvas and the repaint to PATH |
 | | `layout-dump=PATH` | Append every frame's layout tree to PATH |
 

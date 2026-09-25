@@ -58,6 +58,14 @@ pub(crate) fn settle_trace_enabled() -> bool {
     crate::debug_env::diagnostics().settle
 }
 
+/// `IOCRAFT_DEBUG=wake`: print, for every component the harvest scan finds
+/// changed, which hook slots reported Ready. Each printed component is one
+/// reason the next frame renders; a frame with no expected writer shows up
+/// here by name.
+pub(crate) fn wake_trace_enabled() -> bool {
+    crate::debug_env::diagnostics().wake
+}
+
 #[cfg(test)]
 pub(crate) fn set_push_wake_for_tests(enabled: Option<bool>) {
     PUSH_WAKE_TEST_OVERRIDE.with(|cell| {

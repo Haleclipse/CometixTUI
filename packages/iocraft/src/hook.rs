@@ -73,9 +73,16 @@ impl<T: Hook + 'static> AnyHook for T {
 impl Hook for Vec<Box<dyn AnyHook>> {
     fn poll_change(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
         let mut is_ready = false;
-        for hook in self.iter_mut() {
+        let wake_trace = crate::render::wake::wake_trace_enabled();
+        for (index, hook) in self.iter_mut().enumerate() {
             if let Poll::Ready(()) = Pin::new(&mut **hook).poll_change(cx) {
                 is_ready = true;
+                if wake_trace {
+                    eprintln!(
+                        "iocraft-wake-hook #{index} {}",
+                        hook.settle_trace_name().unwrap_or("?")
+                    );
+                }
             }
         }
 

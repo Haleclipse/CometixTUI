@@ -57,6 +57,7 @@ pub(crate) struct Diagnostics {
     pub(crate) settle: bool,
     pub(crate) cells: bool,
     pub(crate) layout: bool,
+    pub(crate) wake: bool,
     pub(crate) frame_log: Option<PathBuf>,
     pub(crate) layout_dump: Option<PathBuf>,
 }
@@ -73,6 +74,7 @@ impl Diagnostics {
                 "settle" => diagnostics.settle = true,
                 "cells" => diagnostics.cells = true,
                 "layout" => diagnostics.layout = true,
+                "wake" => diagnostics.wake = true,
                 "frame-log" => diagnostics.frame_log = non_empty_path(path),
                 "layout-dump" => diagnostics.layout_dump = non_empty_path(path),
                 _ => {}
@@ -157,6 +159,7 @@ mod tests {
                 settle: true,
                 cells: true,
                 layout: false,
+                wake: false,
                 frame_log: Some(PathBuf::from("/Tmp/Frames.log")),
                 layout_dump: None,
             }

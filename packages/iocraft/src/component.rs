@@ -435,6 +435,18 @@ impl InstantiatedComponent {
         } else {
             Poll::Pending
         };
+        if (component_status.is_ready() || hooks_status.is_ready())
+            && crate::render::wake::wake_trace_enabled()
+        {
+            // Printed after the hook lines above, so a hook line belongs to
+            // the next component line (same order as the settle trace).
+            eprintln!(
+                "iocraft-wake component={} body={} hooks={}",
+                self.helper.component_type_name(),
+                component_status.is_ready(),
+                hooks_status.is_ready(),
+            );
+        }
         if component_status.is_ready() || children_status.is_ready() || hooks_status.is_ready() {
             self.pending_change = true;
             Poll::Ready(())
