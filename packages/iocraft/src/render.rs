@@ -720,7 +720,9 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
                                     .layout_engine
                                     .new_leaf_with_context(
                                         Style::default(),
-                                        LayoutEngineNodeContext::default(),
+                                        LayoutEngineNodeContext::for_component(
+                                            child.helper().component_type_name(),
+                                        ),
                                     )
                                     .expect("we should be able to add the node");
                                 child_node_ids.push(new_node_id);
@@ -1370,6 +1372,17 @@ pub type MeasureFunc =
 pub(crate) struct LayoutEngineNodeContext {
     measure_func: Option<MeasureFunc>,
     measure_memo: MeasureMemo,
+    /// The component whose node this is, for `IOCRAFT_DEBUG=layout-dump`.
+    component_name: Option<&'static str>,
+}
+
+impl LayoutEngineNodeContext {
+    fn for_component(component_name: &'static str) -> Self {
+        Self {
+            component_name: Some(component_name),
+            ..Self::default()
+        }
+    }
 }
 
 // Taffy probes a flex item with up to seven distinct (known, available)
@@ -1585,7 +1598,10 @@ impl<'a> Tree<'a> {
     fn new(mut props: AnyProps<'a>, helper: Box<dyn ComponentHelperExt>) -> Self {
         let mut layout_engine = LayoutEngine::new();
         let root_node_id = layout_engine
-            .new_leaf_with_context(Style::default(), LayoutEngineNodeContext::default())
+            .new_leaf_with_context(
+                Style::default(),
+                LayoutEngineNodeContext::for_component(helper.component_type_name()),
+            )
             .expect("we should be able to add the root");
         let wrapper_node_id = layout_engine
             .new_with_children(Style::default(), &[root_node_id])
@@ -2365,10 +2381,23 @@ fn debug_dump_layout_tree(layout_engine: &LayoutEngine, root_node_id: NodeId) {
                 .map(|c| c.len())
                 .unwrap_or(0);
             let style = layout_engine.style(node_id).ok();
+            // The owning component's type name without its module path;
+            // generic parameters, if any, stay so `View` and `Text` differ
+            // from an app component that happens to share the last segment.
+            let name = layout_engine
+                .get_node_context(node_id)
+                .and_then(|cx| cx.component_name)
+                .map(|name| {
+                    let end = name.find('<').unwrap_or(name.len());
+                    let base = &name[..end];
+                    let short = base.rsplit("::").next().unwrap_or(base);
+                    format!("{short}{}", &name[end..])
+                })
+                .unwrap_or_default();
             let _ = std::fmt::Write::write_fmt(
                 buf,
                 format_args!(
-                    "{indent}{:?} x={:.1} y={:.1} w={:.1} h={:.1} children={} style={:?}\n",
+                    "{indent}{:?} name={name} x={:.1} y={:.1} w={:.1} h={:.1} children={} style={:?}\n",
                     node_id,
                     layout.location.x,
                     layout.location.y,
