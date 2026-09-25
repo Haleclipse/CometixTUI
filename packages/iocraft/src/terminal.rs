@@ -792,6 +792,21 @@ impl<'a> Terminal<'a> {
                     }
                     _ => {}
                 }
+                // CC Ink `App.tsx` "Failsafe: if we receive input, the terminal
+                // must be focused": a key or paste that arrives after a
+                // focus-out means the focus-in was dropped (some emulators
+                // do), so the input stands in for it. Focus subscribers see
+                // the synthesized focus-in before the input itself, the way
+                // CC's `setTerminalFocused(true)` notifies its store first.
+                if self.terminal_focus_state == Some(false)
+                    && matches!(event, TerminalEvent::Key(_) | TerminalEvent::Paste(_))
+                {
+                    self.terminal_focus_state = Some(true);
+                    let _ = Self::dispatch_to_subscribers(
+                        &mut self.subscribers,
+                        TerminalEvent::FocusGained,
+                    );
+                }
                 let is_resize = matches!(event, TerminalEvent::Resize(..));
                 if let TerminalEvent::Resize(width, height) = &event {
                     let next_size = (*width, *height);
@@ -807,27 +822,9 @@ impl<'a> Terminal<'a> {
                 let event = Self::annotate_terminal_event(event, event_cell_snapshot.as_ref());
 
                 // Dispatch to the interested subscribers first — Ctrl+C is a
-                // normal event. A subscriber whose interest does not cover the
-                // event is left untouched: no clone, no queue entry, no wake.
-                let shared_state = Arc::new(SharedEventState::default());
-                let mut delivered = false;
-                self.subscribers.retain(|subscriber| {
-                    let Some(subscriber) = subscriber.upgrade() else {
-                        return false;
-                    };
-                    if !subscriber.interest().covers(&event) {
-                        return true;
-                    }
-                    delivered = true;
-                    let mut inner = subscriber.inner.lock().unwrap();
-                    inner
-                        .pending
-                        .push_back((event.clone(), shared_state.clone()));
-                    if let Some(waker) = inner.waker.take() {
-                        waker.wake();
-                    }
-                    true
-                });
+                // normal event.
+                let (delivered, shared_state) =
+                    Self::dispatch_to_subscribers(&mut self.subscribers, event);
 
                 if is_ctrl_c && !self.ignore_ctrl_c {
                     if delivered {
@@ -849,6 +846,38 @@ impl<'a> Terminal<'a> {
                 Ok(())
             }
         }
+    }
+
+    /// Queues `event` on every subscriber whose interest covers it and wakes
+    /// them. A subscriber whose interest does not cover the event is left
+    /// untouched: no clone, no queue entry, no wake. Returns whether anyone
+    /// received it and the propagation state the deferred Ctrl+C check reads.
+    /// Takes the field rather than `self` so `wait` can call it while it
+    /// holds the event stream.
+    fn dispatch_to_subscribers(
+        subscribers: &mut Vec<Weak<TerminalEventsShared>>,
+        event: TerminalEvent,
+    ) -> (bool, Arc<SharedEventState>) {
+        let shared_state = Arc::new(SharedEventState::default());
+        let mut delivered = false;
+        subscribers.retain(|subscriber| {
+            let Some(subscriber) = subscriber.upgrade() else {
+                return false;
+            };
+            if !subscriber.interest().covers(&event) {
+                return true;
+            }
+            delivered = true;
+            let mut inner = subscriber.inner.lock().unwrap();
+            inner
+                .pending
+                .push_back((event.clone(), shared_state.clone()));
+            if let Some(waker) = inner.waker.take() {
+                waker.wake();
+            }
+            true
+        });
+        (delivered, shared_state)
     }
 
     pub fn events(&mut self) -> io::Result<TerminalEvents> {

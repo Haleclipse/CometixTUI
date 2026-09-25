@@ -190,4 +190,39 @@ mod tests {
 
         assert_eq!(canvases.last().unwrap().to_string(), "late=Blurred\n");
     }
+
+    // Exits only once the terminal reports focused. With no `FocusGained`
+    // in the event stream, reaching Focused proves the input stood in for
+    // it (the mock delivers both events in one poll, so the intermediate
+    // Blurred render is not observable here).
+    #[component]
+    fn RefocusByInputProbe(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let state = hooks.use_terminal_focus_state();
+        if state == TerminalFocusState::Focused {
+            system.exit();
+        }
+        element!(Text(content: format!("state={state:?}")))
+    }
+
+    // CC Ink `App.tsx` "Failsafe: if we receive input, the terminal must be
+    // focused": a key after a focus-out counts as the focus-in some
+    // emulators drop, without waiting for `ESC [ I`.
+    #[test]
+    fn test_use_terminal_focus_treats_input_while_blurred_as_focus_regained() {
+        let canvases: Vec<_> = smol::block_on(
+            element!(RefocusByInputProbe)
+                .mock_terminal_render_loop(MockTerminalConfig::with_events(stream::iter(vec![
+                    TerminalEvent::FocusLost,
+                    TerminalEvent::Key(KeyEvent {
+                        code: KeyCode::Char('a'),
+                        modifiers: KeyModifiers::empty(),
+                        kind: KeyEventKind::Press,
+                    }),
+                ])))
+                .collect(),
+        );
+
+        assert_eq!(canvases.last().unwrap().to_string(), "state=Focused\n");
+    }
 }
