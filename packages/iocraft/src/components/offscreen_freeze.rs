@@ -194,7 +194,11 @@ impl Component for OffscreenFreeze {
         let frozen = draw_cache.frozen && !in_virtual_list;
         let refresh = props.refresh_key != self.refresh_key;
         self.refresh_key = props.refresh_key;
-        if frozen && refresh {
+        // Whether this frame's draw finds the subtree frozen is only known at
+        // draw time: a subtree visible last frame can leave the viewport in
+        // this one, where the snapshot taken while it was visible holds the
+        // pre-refresh content. So the draw is told about every refresh.
+        if refresh {
             draw_cache.refreshed = true;
         }
         updater.set_skip_child_poll(frozen && !refresh && props.skip_poll.unwrap_or(false));
@@ -327,6 +331,63 @@ mod tests {
                 Text(content: "row 7")
             }
         }
+    }
+
+    static ENTERING_REFRESH_CHILD_MOUNTS: AtomicUsize = AtomicUsize::new(0);
+
+    #[component]
+    fn EnteringRefreshChild(
+        props: &RefreshChildProps,
+        mut hooks: Hooks,
+    ) -> impl Into<AnyElement<'static>> {
+        let mount =
+            hooks.use_const(|| ENTERING_REFRESH_CHILD_MOUNTS.fetch_add(1, Ordering::SeqCst) + 1);
+        element!(Text(content: format!("child mount={mount} label={}", props.label)))
+    }
+
+    /// The key changes in the very frame that pushes the subtree out of the
+    /// three-row viewport for the first time: the rows below grow with it.
+    #[component]
+    fn RefreshEnteringFreezeApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let tick = use_frame_clock(&mut hooks);
+        if tick >= 5 {
+            system.exit();
+        }
+        let phase = u64::from(tick >= 2);
+        let rows = if tick >= 2 { 7 } else { 1 };
+
+        element! {
+            View(flex_direction: FlexDirection::Column) {
+                OffscreenFreeze(terminal_rows: Some(3), refresh_key: Some(phase)) {
+                    EnteringRefreshChild(label: format!("phase {phase}"))
+                }
+                #((0..rows).map(|row| element!(Text(content: format!("row {row}")))))
+            }
+        }
+    }
+
+    #[test]
+    fn test_offscreen_freeze_refresh_in_the_frame_that_first_freezes() {
+        // The previous frame was visible, so its snapshot holds the old
+        // content; the refresh must not be dropped for it just because the
+        // subtree was not frozen when the key changed.
+        ENTERING_REFRESH_CHILD_MOUNTS.store(0, Ordering::SeqCst);
+        let canvases: Vec<_> = smol::block_on(
+            element!(RefreshEnteringFreezeApp)
+                .mock_terminal_render_loop(MockTerminalConfig::default())
+                .collect(),
+        );
+        let rendered = canvases.last().unwrap().to_string();
+        assert!(
+            rendered.contains("row 6"),
+            "the rows below must have grown past the viewport: {rendered:?}"
+        );
+        assert!(
+            rendered.starts_with("child mount=1 label=phase 1"),
+            "the refresh that coincides with freezing must reach the canvas: {rendered:?}"
+        );
+        assert_eq!(ENTERING_REFRESH_CHILD_MOUNTS.load(Ordering::SeqCst), 1);
     }
 
     #[test]
