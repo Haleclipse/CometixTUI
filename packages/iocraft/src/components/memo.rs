@@ -262,6 +262,89 @@ mod tests {
         );
     }
 
+    #[derive(Default, Props)]
+    struct SettleRelayProps {
+        value: u8,
+    }
+
+    /// Mirrors its prop into state during render — a render-phase write, so
+    /// the frame that changes the prop takes a settle round.
+    #[component]
+    fn SettleRelay(props: &SettleRelayProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut seen = hooks.use_state(|| 0u8);
+        if seen.get() != props.value {
+            seen.set(props.value);
+        }
+        element!(Text(content: format!("relay {}", seen.get())))
+    }
+
+    #[component]
+    fn SettleBlitApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut value = hooks.use_state(|| 0u8);
+        hooks.use_terminal_events(move |event| {
+            if matches!(event, TerminalEvent::Key(key) if key.kind == KeyEventKind::Press) {
+                value.set(value.get() + 1);
+            }
+        });
+        element! {
+            View(flex_direction: FlexDirection::Column) {
+                Memo(memo_key: format!("value {}", value.get()), compare: memo_key_eq as MemoComparator) {
+                    Text(content: format!("memo {}", value.get()))
+                }
+                SettleRelay(value: value.get())
+            }
+        }
+    }
+
+    /// A memo whose key changed re-enters its children in the frame's first
+    /// update pass and retains them in the settle round that follows. The
+    /// previous canvas predates the first pass, so the retained-blit must not
+    /// restore the subtree from it.
+    #[test]
+    fn test_retained_blit_skips_a_memo_that_re_rendered_earlier_in_the_frame() {
+        use std::sync::{Arc, Mutex};
+        crate::render::set_retained_blit_for_tests(Some(true));
+        crate::render::wake::set_push_wake_for_tests(Some(true));
+        let settle_rounds = Arc::new(Mutex::new(Vec::new()));
+        let rounds = Arc::clone(&settle_rounds);
+        let frames = smol::block_on(async move {
+            let (keys, events) = futures::channel::mpsc::unbounded();
+            let mut app = element!(SettleBlitApp);
+            let mut render_loop = Box::pin(app.mock_terminal_render_loop_with_profile(
+                MockTerminalConfig::with_events(events),
+                move |profile| rounds.lock().unwrap().push(profile.phases.settle_rounds),
+            ));
+            let mut frames = Vec::new();
+            while let Some(canvas) = render_loop.next().await {
+                let text = canvas.to_string();
+                frames.push(text.clone());
+                if text.contains("relay 1") {
+                    break;
+                }
+                if frames.len() == 1 {
+                    keys.unbounded_send(TerminalEvent::Key(KeyEvent::new(
+                        KeyEventKind::Press,
+                        KeyCode::Char('a'),
+                    )))
+                    .unwrap();
+                }
+            }
+            frames
+        });
+        crate::render::wake::set_push_wake_for_tests(None);
+        crate::render::set_retained_blit_for_tests(None);
+        let last = frames.last().unwrap();
+        assert!(last.contains("relay 1"), "{frames:?}");
+        assert!(
+            settle_rounds.lock().unwrap().iter().any(|&rounds| rounds > 0),
+            "the key frame must take a settle round for this to test anything"
+        );
+        assert!(
+            last.contains("memo 1"),
+            "the re-rendered memo was blitted back from the previous frame: {frames:?}"
+        );
+    }
+
     #[component]
     fn NoComparatorMemoApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let mut system = hooks.use_context_mut::<SystemContext>();

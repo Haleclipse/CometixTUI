@@ -151,10 +151,16 @@ pub(crate) struct InstantiatedComponent {
     // update. Memo-like wrappers reuse this list when they retain children
     // without re-entering the skipped subtree.
     exposed_child_node_ids: Vec<NodeId>,
-    // This update retained its children without re-entering them (memo
-    // comparator matched, no retained child signaled a change) — the safety
-    // invariant for the retained-blit draw fast path.
+    // Every update since the last draw retained its children without
+    // re-entering them (memo comparator matched, no retained child signaled a
+    // change) — the safety invariant for the retained-blit draw fast path,
+    // which restores the subtree from the previous committed canvas.
     subtree_retained: bool,
+    // An update since the last draw re-entered the children. A render-phase
+    // settle round (`render.rs`) updates the tree again before the frame's one
+    // draw; a memo whose key changed re-enters in the first pass and retains in
+    // the next, and the previous canvas predates that first pass.
+    children_updated_since_draw: bool,
     // Absolute canvas rectangle this subtree drew into last frame. A blit is
     // only attempted when the current layout resolves to the same rectangle.
     cached_blit_bounds: Option<(usize, usize, usize, usize)>,
@@ -185,6 +191,7 @@ impl InstantiatedComponent {
             pending_change: false,
             exposed_child_node_ids: Vec::new(),
             subtree_retained: false,
+            children_updated_since_draw: false,
             cached_blit_bounds: None,
             wake_state,
             proxy_waker,
@@ -232,12 +239,16 @@ impl InstantiatedComponent {
         self.first_update = false;
         self.has_transparent_layout = updater.has_transparent_layout();
         self.skip_child_poll = updater.should_skip_child_poll();
-        self.subtree_retained = updater.did_retain_children();
+        let retained = updater.did_retain_children();
+        self.children_updated_since_draw |= !retained;
+        self.subtree_retained = retained && !self.children_updated_since_draw;
         self.exposed_child_node_ids = unattached_child_node_ids[exposed_start..].to_vec();
         self.pending_change = false;
     }
 
     pub fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {
+        // `subtree_retained` already folded this in; the next frame starts over.
+        self.children_updated_since_draw = false;
         if self.has_transparent_layout {
             // If the component has a transparent layout, provide the first child's layout to the
             // hooks and component.
