@@ -30,6 +30,13 @@ pub struct OffscreenFreezeProps<'a> {
     /// `false`, preserving existing child subscription/timer polling unless the
     /// caller explicitly opts into a harder freeze.
     pub skip_poll: Option<bool>,
+
+    /// Re-renders the subtree once, even while frozen, whenever this value
+    /// changes. CC's frozen element is only a cached React element: a context
+    /// it reads (a theme, say) still re-renders it. Here the children are
+    /// updated in place, keeping their component instances and state, the
+    /// stale snapshot is dropped, and the refreshed draw becomes the new one.
+    pub refresh_key: Option<u64>,
 }
 
 struct OffscreenFreezeSnapshot {
@@ -65,6 +72,9 @@ struct OffscreenFreezeDrawCache {
     damage_on_restore: bool,
     terminal_rows: u16,
     snapshot: Option<OffscreenFreezeSnapshot>,
+    // The children were refreshed while frozen: draw them instead of the
+    // snapshot this frame, then take the result as the snapshot.
+    refreshed: bool,
 }
 
 impl Hook for OffscreenFreezeDrawCache {
@@ -72,6 +82,10 @@ impl Hook for OffscreenFreezeDrawCache {
         self.frozen =
             !self.bypassed && !is_drawer_visible_in_terminal_viewport(drawer, self.terminal_rows);
         if !self.frozen {
+            return;
+        }
+        if self.refreshed {
+            self.snapshot = None;
             return;
         }
 
@@ -108,11 +122,12 @@ impl Hook for OffscreenFreezeDrawCache {
     }
 
     fn post_component_draw(&mut self, drawer: &mut ComponentDrawer) {
+        let refreshed = std::mem::take(&mut self.refreshed);
         if self.bypassed {
             self.snapshot = None;
             return;
         }
-        if self.frozen {
+        if self.frozen && !refreshed {
             return;
         }
 
@@ -148,15 +163,20 @@ impl Hook for OffscreenFreezeDrawCache {
 /// [`InVirtualListContext`] is present, freezing is bypassed because virtual
 /// lists clip inside an app viewport rather than native scrollback. Draw-time
 /// viewport checks restore the last visible canvas snapshot without scheduling
-/// an extra render.
+/// an extra render. A changed [`OffscreenFreezeProps::refresh_key`] re-renders
+/// a frozen subtree in place.
 #[derive(Default)]
-pub struct OffscreenFreeze;
+pub struct OffscreenFreeze {
+    refresh_key: Option<u64>,
+}
 
 impl Component for OffscreenFreeze {
     type Props<'a> = OffscreenFreezeProps<'a>;
 
-    fn new(_props: &Self::Props<'_>) -> Self {
-        Self
+    fn new(props: &Self::Props<'_>) -> Self {
+        Self {
+            refresh_key: props.refresh_key,
+        }
     }
 
     fn update(
@@ -172,9 +192,14 @@ impl Component for OffscreenFreeze {
         draw_cache.bypassed = in_virtual_list;
         draw_cache.damage_on_restore = props.damage_on_restore.unwrap_or(false);
         let frozen = draw_cache.frozen && !in_virtual_list;
-        updater.set_skip_child_poll(frozen && props.skip_poll.unwrap_or(false));
+        let refresh = props.refresh_key != self.refresh_key;
+        self.refresh_key = props.refresh_key;
+        if frozen && refresh {
+            draw_cache.refreshed = true;
+        }
+        updater.set_skip_child_poll(frozen && !refresh && props.skip_poll.unwrap_or(false));
 
-        if !frozen {
+        if !frozen || refresh {
             updater.update_children(props.children.iter_mut(), None);
         }
         // When offscreen, intentionally do not call update_children. The
@@ -260,6 +285,64 @@ mod tests {
             rendered.starts_with("child renders=1"),
             "offscreen child should stay frozen after first visible render: {rendered:?}"
         );
+    }
+
+    static REFRESH_CHILD_MOUNTS: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Default, Props)]
+    struct RefreshChildProps {
+        label: String,
+    }
+
+    /// Records its mount number at mount — state a remount would lose — and
+    /// shows the label it was last rendered with.
+    #[component]
+    fn RefreshChild(props: &RefreshChildProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mount = hooks.use_const(|| REFRESH_CHILD_MOUNTS.fetch_add(1, Ordering::SeqCst) + 1);
+        element!(Text(content: format!("child mount={mount} label={}", props.label)))
+    }
+
+    #[component]
+    fn RefreshFreezeApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let tick = use_frame_clock(&mut hooks);
+        if tick >= 5 {
+            system.exit();
+        }
+        // The key and the child's input change together at tick 2, while the
+        // subtree is frozen above a three-row viewport.
+        let phase = u64::from(tick >= 2);
+
+        element! {
+            View(flex_direction: FlexDirection::Column) {
+                OffscreenFreeze(terminal_rows: Some(3), refresh_key: Some(phase)) {
+                    RefreshChild(label: format!("phase {phase}"))
+                }
+                Text(content: "row 1")
+                Text(content: "row 2")
+                Text(content: "row 3")
+                Text(content: "row 4")
+                Text(content: "row 5")
+                Text(content: "row 6")
+                Text(content: "row 7")
+            }
+        }
+    }
+
+    #[test]
+    fn test_offscreen_freeze_refresh_key_rerenders_frozen_children_in_place() {
+        REFRESH_CHILD_MOUNTS.store(0, Ordering::SeqCst);
+        let canvases: Vec<_> = smol::block_on(
+            element!(RefreshFreezeApp)
+                .mock_terminal_render_loop(MockTerminalConfig::default())
+                .collect(),
+        );
+        let rendered = canvases.last().unwrap().to_string();
+        assert!(
+            rendered.starts_with("child mount=1 label=phase 1"),
+            "a refresh re-renders the frozen child in place, keeping its instance: {rendered:?}"
+        );
+        assert_eq!(REFRESH_CHILD_MOUNTS.load(Ordering::SeqCst), 1);
     }
 
     #[component]
